@@ -88,6 +88,7 @@ struct PairwiseDistances : public BaseClass {
 
   AccT acc[P::AccRowsPerTh][P::AccColsPerTh];
 
+
  public:
   // Constructor
   DI PairwiseDistances(const DataT* _x,
@@ -284,6 +285,289 @@ struct PairwiseDistances : public BaseClass {
     }
   }
 };  // struct PairwiseDistances
+
+
+
+
+
+
+
+template <bool useNorms,
+          typename DataT,
+          typename AccT,
+          typename OutT,
+          typename IdxT,
+          typename Policy,
+          typename CoreLambda,
+          typename EpilogueLambda,
+          typename FinalLambda,
+          typename rowEpilogueLambda,
+          bool isRowMajor    = true,
+          bool writeOut      = true,
+          typename BaseClass = raft::linalg::Contractions_NT_GF<DataT, IdxT, Policy, isRowMajor>>
+struct PairwiseDistances_GF : public BaseClass {
+ private:
+  typedef Policy P;
+  const DataT* xn;
+  const DataT* yn;
+  const DataT* const yBase1;
+  const DataT* const yBase2;
+  OutT* dOutput;
+  char* smem;
+  CoreLambda core_op;
+  EpilogueLambda epilog_op;
+  FinalLambda fin_op;
+  rowEpilogueLambda rowEpilog_op;
+
+  AccT acc[P::AccRowsPerTh][P::AccColsPerTh];
+  AccT acc2[P::AccRowsPerTh][P::AccColsPerTh];
+
+ public:
+  // Constructor
+  DI PairwiseDistances_GF(const DataT* _x1,
+                       const DataT* _x2,
+                       const DataT* _y1,
+                       const DataT* _y2,
+                       IdxT _m,
+                       IdxT _n,
+                       IdxT _k1,
+                       IdxT _k2,
+                       IdxT _lda,
+                       IdxT _ldb,
+                       IdxT _ldd,
+                       const DataT* _xn,
+                       const DataT* _yn,
+                       OutT* _dOutput,
+                       char* _smem,
+                       CoreLambda _core_op,
+                       EpilogueLambda _epilog_op,
+                       FinalLambda _fin_op,
+                       rowEpilogueLambda _rowEpilog_op)
+    : BaseClass(_x1, _x2, _y1, _y2, _m, _n, _k1, _k2, _smem),
+      xn(_xn),
+      yn(_yn),
+      yBase1(_y1),
+      yBase2(_y2),
+      dOutput(_dOutput),
+      smem(_smem),
+      core_op(_core_op),
+      epilog_op(_epilog_op),
+      fin_op(_fin_op),
+      rowEpilog_op(_rowEpilog_op)
+  {
+  }
+
+  DI void run()
+  {
+    for (auto gridStrideY = blockIdx.y * P::Mblk; gridStrideY < this->m;
+         gridStrideY += P::Mblk * gridDim.y) {
+      for (auto gridStrideX = blockIdx.x * P::Nblk; gridStrideX < this->n;
+           gridStrideX += P::Nblk * gridDim.x) {
+        if (gridStrideX !=  blockIdx.x * P::Nblk) {
+        }
+        prolog1(gridStrideX, gridStrideY);
+        loop1();
+        prolog2(gridStrideX, gridStrideY);
+        loop2();
+        epilog(gridStrideX, gridStrideY);
+      }
+      rowEpilog_op(gridStrideY);
+    }
+  }
+
+ private:
+  DI void updateIndicesY()
+  {
+    const auto stride = P::Nblk * gridDim.x;
+    if (isRowMajor) {
+      this->y1 += stride * this->ldb;
+      this->y2 += stride * this->ldb;
+
+    } else {
+      this->y1 += stride;
+      this->y2 += stride;
+    }
+    this->yrowid += stride;
+  }
+
+  DI void updateIndicesXY()
+  {
+    const auto stride = P::Mblk * gridDim.y;
+    if (isRowMajor) {
+      this->x1 += stride * this->lda;
+      this->x2 += stride * this->lda;
+
+      this->yrowid = IdxT(blockIdx.x) * P::Nblk + this->srowid;
+      this->y1      = yBase1 + this->yrowid * this->ldb;
+      //fixme ybase -> ybase{1,2}?
+      this->y2      = yBase2 + this->yrowid * this->ldb;
+
+    } else {
+      this->x1 += stride;
+      this->x2 += stride;
+
+      this->yrowid = IdxT(blockIdx.x) * P::Nblk;
+      //fixme see aboev
+      this->y1      = yBase1 + this->yrowid + this->srowid * this->ldb;
+      this->y2      = yBase2 + this->yrowid + this->srowid * this->ldb;
+
+    }
+    this->xrowid += stride;
+  }
+
+  DI void ldgNextGridStride(IdxT gridStrideX, IdxT gridStrideY)
+  {
+    // Fetch next grid stride ldg if within range
+    if ((gridStrideX + gridDim.x * P::Nblk) < this->n) {
+      updateIndicesY();
+      this->ldgXY1(0);
+    } else if ((gridStrideY + gridDim.y * P::Mblk) < this->m) {
+      updateIndicesXY();
+      this->ldgXY1(0);
+    }
+  }
+
+  DI void prolog1(IdxT gridStrideX, IdxT gridStrideY)
+  {
+    if (gridStrideX == blockIdx.x * P::Nblk) { this->ldgXY1(0); }
+
+#pragma unroll
+    for (int i = 0; i < P::AccRowsPerTh; ++i) {
+#pragma unroll
+      for (int j = 0; j < P::AccColsPerTh; ++j) {
+        acc[i][j] = BaseClass::Zero;
+      }
+    }
+
+    this->stsXY();
+    __syncthreads();
+    this->pageWr ^= 1;
+  }
+
+  DI void prolog2(IdxT gridStrideX, IdxT gridStrideY)
+  {
+    this->ldgXY2(0);
+
+#pragma unroll
+    for (int i = 0; i < P::AccRowsPerTh; ++i) {
+#pragma unroll
+      for (int j = 0; j < P::AccColsPerTh; ++j) {
+        acc2[i][j] = BaseClass::Zero;
+      }
+    }
+
+    this->stsXY();
+    __syncthreads();
+    this->pageWr ^= 1;
+  }
+
+
+  DI void loop1()
+  {
+    for (int kidx = P::Kblk; kidx < this->k1; kidx += P::Kblk) {
+      this->ldgXY1(kidx);
+      accumulate1();  // on the previous k-block
+      this->stsXY();
+      __syncthreads();
+      this->pageWr ^= 1;
+      this->pageRd ^= 1;
+    }
+    accumulate1();  // last iteration
+    // This is needed for making sure next grid stride of
+    // non-norm based metrics uses previously accumulated buffer so
+    // it doesn't make shmem dirty until previous iteration
+    // is complete.
+    this->pageRd ^= 1;
+  }
+
+    DI void loop2()
+  {
+    for (int kidx = P::Kblk; kidx < this->k2; kidx += P::Kblk) {
+      this->ldgXY2(kidx);
+      accumulate2();  // on the previous k-block
+      this->stsXY();
+      __syncthreads();
+      this->pageWr ^= 1;
+      this->pageRd ^= 1;
+    }
+    accumulate2();  // last iteration
+    // This is needed for making sure next grid stride of
+    // non-norm based metrics uses previously accumulated buffer so
+    // it doesn't make shmem dirty until previous iteration
+    // is complete.
+    this->pageRd ^= 1;
+  }
+
+  DI void accumulate1()
+  {
+#pragma unroll
+    for (int ki = 0; ki < P::Kblk; ki += P::Veclen) {
+      this->ldsXY1(ki);
+#pragma unroll
+      for (int i = 0; i < P::AccRowsPerTh; ++i) {
+#pragma unroll
+        for (int j = 0; j < P::AccColsPerTh; ++j) {
+#pragma unroll
+          for (int v = 0; v < P::Veclen; ++v) {
+            core_op(acc[i][j], this->regx[i][v], this->regy[j][v]);
+          }
+        }
+      }
+    }
+  }
+
+  DI void accumulate2()
+  {
+#pragma unroll
+    for (int ki = 0; ki < P::Kblk; ki += P::Veclen) {
+      this->ldsXY2(ki);
+#pragma unroll
+      for (int i = 0; i < P::AccRowsPerTh; ++i) {
+#pragma unroll
+        for (int j = 0; j < P::AccColsPerTh; ++j) {
+#pragma unroll
+          for (int v = 0; v < P::Veclen; ++v) {
+            core_op(acc2[i][j], this->regx[i][v], this->regy[j][v]);
+          }
+        }
+      }
+    }
+  }
+
+  DI void epilog(IdxT gridStrideX, IdxT gridStrideY)
+  {
+   
+    // Overlap ldg with epilog computation
+    ldgNextGridStride(gridStrideX, gridStrideY);
+    #pragma unroll
+    for (int i = 0; i < P::AccRowsPerTh; ++i) {
+      #pragma unroll
+      for (int j = 0; j < P::AccColsPerTh; ++j) {
+        acc[i][j] *= acc2[i][j];
+      }
+    }
+
+    epilog_op(acc, nullptr, nullptr, gridStrideX, gridStrideY);
+  
+  }
+};  // struct PairwiseDistances
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 /**
  * @brief the distance matrix calculation kernel for L1, L2 and cosine

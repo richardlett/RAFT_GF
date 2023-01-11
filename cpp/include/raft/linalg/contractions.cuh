@@ -224,7 +224,7 @@ struct Policy2x8<double, _veclen> {
  *                See documentation for `KernelPolicy` to know more.
  */
 using detail::Contractions_NT;
-
+using detail::Contractions_NT_GF;
 }  // namespace linalg
 }  // namespace raft
 

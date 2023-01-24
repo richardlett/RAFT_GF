@@ -371,6 +371,9 @@ __global__ __launch_bounds__(P::Nthreads, 2) void fusedL2NNkernel_GF(OutT* min,
   IdxT lda1 = k1, ldb1 = k1, ldd = n;
 
   IdxT lda2 = k2, ldb2 = k2;
+
+
+
   PairwiseDistances_GF<true,
                     DataT,
                     DataT,
@@ -383,16 +386,17 @@ __global__ __launch_bounds__(P::Nthreads, 2) void fusedL2NNkernel_GF(OutT* min,
                     decltype(rowEpilog_lambda),
                     true,
                     false>
+                    
     obj(x1,
+        x2,
         y1,
+        y2,
         m,
         n,
         k1,
         k2,
         lda1,
-        lda2,
         ldb1,
-        ldb2,
         ldd,
         xn,
         yn,

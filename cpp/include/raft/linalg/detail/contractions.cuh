@@ -393,7 +393,7 @@ struct Contractions_NT_GF {
       lda1(_k1),
       ldb1(_k1),
       lda2(_k2),
-      ldb1(_k2),
+      ldb2(_k2),
       xrowid(IdxT(blockIdx.x) * P::Mblk + threadIdx.x / P::LdgThRow),
       yrowid(IdxT(blockIdx.y) * P::Nblk + threadIdx.x / P::LdgThRow),
       x1(_x1 + xrowid * lda1),
@@ -466,6 +466,12 @@ struct Contractions_NT_GF {
   {
     ldgX1(kidx);
     ldgY1(kidx);
+  }
+
+    DI void ldgXY2(IdxT kidx)
+  {
+    ldgX2(kidx);
+    ldgY2(kidx);
   }
 
   /**

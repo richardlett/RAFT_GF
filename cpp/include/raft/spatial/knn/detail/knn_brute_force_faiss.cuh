@@ -192,6 +192,180 @@ inline void knn_merge_parts(value_t* inK,
       inK, inV, outK, outV, n_samples, n_parts, k, stream, translations);
 }
 
+
+/**
+ * Search the kNN for the k-nearest neighbors of a set of query vectors
+ * @param[in] input vector of device device memory array pointers to search
+ * @param[in] sizes vector of memory sizes for each device array pointer in input
+ * @param[in] D number of cols in input and search_items
+ * @param[in] search_items set of vectors to query for neighbors
+ * @param[in] n        number of items in search_items
+ * @param[out] res_I    pointer to device memory for returning k nearest indices
+ * @param[out] res_D    pointer to device memory for returning k nearest distances
+ * @param[in] k        number of neighbors to query
+ * @param[in] userStream the main cuda stream to use
+ * @param[in] internalStreams optional when n_params > 0, the index partitions can be
+ *        queried in parallel using these streams. Note that n_int_streams also
+ *        has to be > 0 for these to be used and their cardinality does not need
+ *        to correspond to n_parts.
+ * @param[in] n_int_streams size of internalStreams. When this is <= 0, only the
+ *        user stream will be used.
+ * @param[in] rowMajorIndex are the index arrays in row-major layout?
+ * @param[in] rowMajorQuery are the query array in row-major layout?
+ * @param[in] translations translation ids for indices when index rows represent
+ *        non-contiguous partitions
+ * @param[in] metric corresponds to the raft::distance::DistanceType enum (default is L2Expanded)
+ * @param[in] metricArg metric argument to use. Corresponds to the p arg for lp norm
+ */
+template <typename IntType = int, typename IdxType = std::int64_t, typename value_t = float>
+void brute_force_knn_impl_GF(
+  const raft::handle_t& handle,
+  std::vector<value_t*>& input1,
+  std::vector<value_t*>& input2,
+  std::vector<IntType>& sizes,
+  IntType D1,
+  IntType D2,
+  value_t* search_items1,
+  value_t* search_items2,
+  IntType n,
+  IdxType* res_I,
+  value_t* res_D,
+  IntType k,
+  bool rowMajorIndex                  = true,
+  bool rowMajorQuery                  = true,
+  std::vector<IdxType>* translations  = nullptr,
+  raft::distance::DistanceType metric = raft::distance::DistanceType::L2Expanded,
+  float metricArg                     = 0)
+{
+  auto userStream = handle.get_stream();
+
+  ASSERT(input1.size() == sizes.size(), "input and sizes vectors should be the same size");
+  ASSERT(input2.size() == sizes.size(), "input and sizes vectors should be the same size");
+
+  std::vector<IdxType>* id_ranges;
+  if (translations == nullptr) {
+    // If we don't have explicit translations
+    // for offsets of the indices, build them
+    // from the local partitions
+    id_ranges       = new std::vector<IdxType>();
+    IdxType total_n = 0;
+    for (size_t i = 0; i < sizes.size(); i++) {
+      id_ranges->push_back(total_n);
+      total_n += sizes[i];
+    }
+  } else {
+    // otherwise, use the given translations
+    id_ranges = translations;
+  }
+
+//fixme?
+  // perform preprocessing
+  std::unique_ptr<MetricProcessor<value_t>> query_metric_processor =
+    create_processor<value_t>(metric, n, D1, k, rowMajorQuery, userStream);
+  query_metric_processor->preprocess(search_items1);
+
+  std::vector<std::unique_ptr<MetricProcessor<value_t>>> metric_processors(input1.size());
+  for (size_t i = 0; i < input1.size(); i++) {
+    metric_processors[i] =
+      create_processor<value_t>(metric, sizes[i], D1, k, rowMajorQuery, userStream);
+    metric_processors[i]->preprocess(input1[i]);
+  }
+
+  int device;
+  RAFT_CUDA_TRY(cudaGetDevice(&device));
+
+  rmm::device_uvector<IdxType> trans(id_ranges->size(), userStream);
+  raft::update_device(trans.data(), id_ranges->data(), id_ranges->size(), userStream);
+
+  rmm::device_uvector<value_t> all_D(0, userStream);
+  rmm::device_uvector<IdxType> all_I(0, userStream);
+
+  value_t* out_D = res_D;
+  IdxType* out_I = res_I;
+
+  if (sizes.size() > 1) {
+    all_D.resize(sizes.size() * k * n, userStream);
+    all_I.resize(sizes.size() * k * n, userStream);
+
+    out_D = all_D.data();
+    out_I = all_I.data();
+  }
+
+  // Make other streams from pool wait on main stream
+  handle.wait_stream_pool_on_stream();
+
+  for (size_t i = 0; i < sizes.size(); i++) {
+    value_t* out_d_ptr = out_D + (i * k * n);
+    IdxType* out_i_ptr = out_I + (i * k * n);
+
+    auto stream = handle.get_next_usable_stream(i);
+
+    if (k <= 64 && rowMajorQuery == rowMajorIndex && rowMajorQuery == true &&
+        (metric == raft::distance::DistanceType::L2Unexpanded ||
+         metric == raft::distance::DistanceType::L2SqrtUnexpanded ||
+         metric == raft::distance::DistanceType::L2Expanded ||
+         metric == raft::distance::DistanceType::L2SqrtExpanded)) {
+      fusedL2Knn_GF(D1,
+                  D2,
+                 out_i_ptr,
+                 out_d_ptr,
+                 input1[i],
+                 input2[i],
+                 search_items1,
+                 search_items2,
+                 sizes[i],
+                 n,
+                 k,
+                 rowMajorIndex,
+                 rowMajorQuery,
+                 stream,
+                 metric);
+    } else {
+      ASSERT(0 == 1, "Should not reach here e1234");
+    }
+    
+
+    RAFT_CUDA_TRY(cudaPeekAtLastError());
+  }
+
+  // Sync internal streams if used. We don't need to
+  // sync the user stream because we'll already have
+  // fully serial execution.
+  handle.sync_stream_pool();
+
+  if (sizes.size() > 1 || translations != nullptr) {
+    // This is necessary for proper index translations. If there are
+    // no translations or partitions to combine, it can be skipped.
+    knn_merge_parts(out_D, out_I, res_D, res_I, n, sizes.size(), k, userStream, trans.data());
+  }
+
+  // Perform necessary post-processing
+  if (metric == raft::distance::DistanceType::L2SqrtExpanded ||
+      metric == raft::distance::DistanceType::L2SqrtUnexpanded ||
+      metric == raft::distance::DistanceType::LpUnexpanded) {
+    /**
+     * post-processing
+     */
+    float p = 0.5;  // standard l2
+    if (metric == raft::distance::DistanceType::LpUnexpanded) p = 1.0 / metricArg;
+    raft::linalg::unaryOp<float>(
+      res_D,
+      res_D,
+      n * k,
+      [p] __device__(float input) { return powf(fabsf(input), p); },
+      userStream);
+  }
+
+  query_metric_processor->revert(search_items1);
+  query_metric_processor->postprocess(out_D);
+  for (size_t i = 0; i < sizes.size(); i++) {
+    metric_processors[i]->revert(input1[i]);
+  }
+
+  if (translations == nullptr) delete id_ranges;
+};
+
+
 /**
  * Search the kNN for the k-nearest neighbors of a set of query vectors
  * @param[in] input vector of device device memory array pointers to search

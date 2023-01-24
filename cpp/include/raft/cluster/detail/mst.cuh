@@ -52,6 +52,48 @@ void merge_msts(sparse::solver::Graph_COO<value_idx, value_idx, value_t>& coo1,
   coo1.n_edges = final_nnz;
 }
 
+
+template <typename value_idx, typename value_t, typename red_op>
+void connect_knn_graph_GF(
+  const raft::handle_t& handle,
+  const value_t* X1,
+  const value_t* X2,
+  sparse::solver::Graph_COO<value_idx, value_idx, value_t>& msf,
+  size_t m,
+  size_t n1,
+  size_t n2,
+  value_idx* color,
+  red_op reduction_op,
+  raft::distance::DistanceType metric = raft::distance::DistanceType::L2SqrtExpanded)
+{
+  auto stream = handle.get_stream();
+
+  raft::sparse::COO<value_t, value_idx> connected_edges(stream);
+
+  raft::sparse::neighbors::connect_components_GF<value_idx, value_t>(
+    handle, connected_edges, X1, X2, color, m, n1, n2, reduction_op);
+
+  rmm::device_uvector<value_idx> indptr2(m + 1, stream);
+  raft::sparse::convert::sorted_coo_to_csr(
+    connected_edges.rows(), connected_edges.nnz, indptr2.data(), m + 1, stream);
+
+  // On the second call, we hand the MST the original colors
+  // and the new set of edges and let it restart the optimization process
+  auto new_mst =
+    raft::sparse::solver::mst<value_idx, value_idx, value_t, double>(handle,
+                                                                     indptr2.data(),
+                                                                     connected_edges.cols(),
+                                                                     connected_edges.vals(),
+                                                                     m,
+                                                                     connected_edges.nnz,
+                                                                     color,
+                                                                     stream,
+                                                                     false,
+                                                                     false);
+
+  merge_msts<value_idx, value_t>(msf, new_mst, stream);
+}
+
 /**
  * Connect an unconnected knn graph (one in which mst returns an msf). The
  * device buffers underlying the Graph_COO object are modified in-place.
@@ -103,6 +145,73 @@ void connect_knn_graph(
 
   merge_msts<value_idx, value_t>(msf, new_mst, stream);
 }
+
+
+template <typename value_idx, typename value_t, typename red_op>
+void build_sorted_mst_GF(
+  const raft::handle_t& handle,
+  const value_t* X1,
+  const value_t* X2,
+  const value_idx* indptr,
+  const value_idx* indices,
+  const value_t* pw_dists,
+  size_t m,
+  size_t n1,
+  size_t n2,
+  value_idx* mst_src,
+  value_idx* mst_dst,
+  value_t* mst_weight,
+  value_idx* color,
+  size_t nnz,
+  red_op reduction_op,
+  raft::distance::DistanceType metric = raft::distance::DistanceType::L2SqrtExpanded,
+  int max_iter                        = 10)
+{
+  auto stream = handle.get_stream();
+
+  // We want to have MST initialize colors on first call.
+  auto mst_coo = raft::sparse::solver::mst<value_idx, value_idx, value_t, double>(
+    handle, indptr, indices, pw_dists, (value_idx)m, nnz, color, stream, false, true);
+
+  int iters        = 1;
+  int n_components = raft::sparse::neighbors::get_n_components(color, m, stream);
+
+  while (n_components > 1 && iters < max_iter) {
+    connect_knn_graph_GF<value_idx, value_t>(handle, X1, X2, mst_coo, m, n1, n2, color, reduction_op);
+
+    iters++;
+
+    n_components = raft::sparse::neighbors::get_n_components(color, m, stream);
+  }
+
+  /**
+   * The `max_iter` argument was introduced only to prevent the potential for an infinite loop.
+   * Ideally the log2(n) guarantees of the MST should be enough to connect KNN graphs with a
+   * massive number of data samples in very few iterations. If it does not, there are 3 likely
+   * reasons why (in order of their likelihood):
+   * 1. There is a bug in this code somewhere
+   * 2. Either the given KNN graph wasn't generated from X or the same metric is not being used
+   *    to generate the 1-nn (currently only L2SqrtExpanded is supported).
+   * 3. max_iter was not large enough to connect the graph (less likely).
+   *
+   * Note that a KNN graph generated from 50 random isotropic balls (with significant overlap)
+   * was able to be connected in a single iteration.
+   */
+  RAFT_EXPECTS(n_components == 1,
+               "KNN graph could not be connected in %d iterations. "
+               "Please verify that the input knn graph is generated from X "
+               "(and the same distance metric used),"
+               " or increase 'max_iter'",
+               max_iter);
+
+  raft::sparse::op::coo_sort_by_weight(
+    mst_coo.src.data(), mst_coo.dst.data(), mst_coo.weights.data(), mst_coo.n_edges, stream);
+
+  raft::copy_async(mst_src, mst_coo.src.data(), mst_coo.n_edges, stream);
+  raft::copy_async(mst_dst, mst_coo.dst.data(), mst_coo.n_edges, stream);
+  raft::copy_async(mst_weight, mst_coo.weights.data(), mst_coo.n_edges, stream);
+}
+
 
 /**
  * Constructs an MST and sorts the resulting edges in ascending

@@ -169,6 +169,50 @@ inline void select_k(const value_t* in_keys,
   }
 }
 
+template <typename idx_t = std::int64_t, typename value_t = float, typename value_int = int>
+void brute_force_knn_GF(raft::handle_t const& handle,
+                     std::vector<value_t*>& input1,
+                     std::vector<value_t*>& input2,
+                     std::vector<value_int>& sizes,
+                     value_int D1,
+                     value_int D2,
+                     value_t* search_items1,
+                     value_t* search_items2,
+                     value_int n,
+                     idx_t* res_I,
+                     value_t* res_D,
+                     value_int k,
+                     bool rowMajorIndex               = true,
+                     bool rowMajorQuery               = true,
+                     std::vector<idx_t>* translations = nullptr,
+                     distance::DistanceType metric    = distance::DistanceType::L2Unexpanded,
+                     float metric_arg                 = 2.0f)
+{
+  ASSERT(input1.size() == sizes.size(), "input and sizes vectors must be the same size");
+  ASSERT(input2.size() == sizes.size(), "input and sizes vectors must be the same size");
+
+  detail::brute_force_knn_impl_GF(handle,
+                               input1,
+                               input2,
+                               sizes,
+                               D1,
+                               D2,
+                               search_items1,
+                               search_items2,
+                               n,
+                               res_I,
+                               res_D,
+                               k,
+                               rowMajorIndex,
+                               rowMajorQuery,
+                               translations,
+                               metric,
+                               metric_arg);
+}
+
+
+
+
 /**
  * @brief Flat C++ API function to perform a brute force knn on
  * a series of input arrays and combine the results into a single

@@ -216,6 +216,61 @@ void perform_1nn(raft::KeyValuePair<value_idx, value_t>* kvp,
   thrust::transform(rmm::exec_policy(stream), kvp, kvp + n_rows, nn_colors, extract_colors_op);
 }
 
+
+/**
+ * Compute the cross-component 1-nearest neighbors for each row in X using
+ * the given array of components
+ * @tparam value_idx
+ * @tparam value_t
+ * @param[out] kvp mapping of closest neighbor vertex and distance for each vertex in the given
+ * array of components
+ * @param[out] nn_colors components of nearest neighbors for each vertex
+ * @param[in] colors components of each vertex
+ * @param[in] X original dense data
+ * @param[in] n_rows number of rows in original dense data
+ * @param[in] n_cols number of columns in original dense data
+ * @param[in] stream cuda stream for which to order cuda operations
+ */
+template <typename value_idx, typename value_t, typename red_op>
+void perform_1nn_GF(raft::KeyValuePair<value_idx, value_t>* kvp,
+                 value_idx* nn_colors,
+                 value_idx* colors,
+                 const value_t* X1,
+                 const value_t* X2,
+                 size_t n_rows,
+                 size_t n_cols1,
+                 size_t n_cols2,
+                 cudaStream_t stream,
+                 red_op reduction_op)
+{
+  rmm::device_uvector<int> workspace(n_rows, stream);
+  rmm::device_uvector<value_t> x_norm(n_rows, stream);
+
+  //raft::linalg::rowNorm(x_norm.data(), X, n_cols, n_rows, raft::linalg::L2Norm, true, stream);
+
+  raft::distance::fusedL2NN_GF<value_t, raft::KeyValuePair<value_idx, value_t>, value_idx>(
+    kvp,
+    X1,
+    X1,
+    X2,
+    X2,
+    x_norm.data(),
+    x_norm.data(),
+    n_rows,
+    n_rows,
+    n_cols1,
+    n_cols2,
+    workspace.data(),
+    reduction_op,
+    reduction_op,
+    true,
+    true,
+    stream);
+
+  LookupColorOp<value_idx, value_t> extract_colors_op(colors);
+  thrust::transform(rmm::exec_policy(stream), kvp, kvp + n_rows, nn_colors, extract_colors_op);
+}
+
 /**
  * Sort nearest neighboring components wrt component of source vertices
  * @tparam value_idx
@@ -298,6 +353,113 @@ void min_components_by_color(raft::sparse::COO<value_t, value_idx>& coo,
    */
   min_components_by_color_kernel<<<raft::ceildiv(nnz, (size_t)256), 256, 0, stream>>>(
     coo.rows(), coo.cols(), coo.vals(), out_index, indices, kvp, nnz);
+}
+
+
+
+/**
+ * Connects the components of an otherwise unconnected knn graph
+ * by computing a 1-nn to neighboring components of each data point
+ * (e.g. component(nn) != component(self)) and reducing the results to
+ * include the set of smallest destination components for each source
+ * component. The result will not necessarily contain
+ * n_components^2 - n_components number of elements because many components
+ * will likely not be contained in the neighborhoods of 1-nns.
+ * @tparam value_idx
+ * @tparam value_t
+ * @param[in] handle raft handle
+ * @param[out] out output edge list containing nearest cross-component
+ *             edges.
+ * @param[in] X original (row-major) dense matrix for which knn graph should be constructed.
+ * @param[in] colors array containing component number for each row of X
+ * @param[in] n_rows number of rows in X
+ * @param[in] n_cols number of cols in X
+ */
+template <typename value_idx, typename value_t, typename red_op>
+void connect_components_GF(
+  const raft::handle_t& handle,
+  raft::sparse::COO<value_t, value_idx>& out,
+  const value_t* X1,
+  const value_t* X2,
+  const value_idx* orig_colors,
+  size_t n_rows,
+  size_t n_cols1,
+  size_t n_cols2,
+  red_op reduction_op,
+  raft::distance::DistanceType metric = raft::distance::DistanceType::L2SqrtExpanded)
+{
+  auto stream = handle.get_stream();
+
+  RAFT_EXPECTS(metric == raft::distance::DistanceType::L2SqrtExpanded,
+               "Fixing connectivities for an unconnected k-NN graph only "
+               "supports L2SqrtExpanded currently.");
+
+  rmm::device_uvector<value_idx> colors(n_rows, stream);
+  raft::copy_async(colors.data(), orig_colors, n_rows, stream);
+
+  // Normalize colors so they are drawn from a monotonically increasing set
+  raft::label::make_monotonic(colors.data(), colors.data(), n_rows, stream, true);
+
+  value_idx n_components = get_n_components(colors.data(), n_rows, stream);
+
+  /**
+   * First compute 1-nn for all colors where the color of each data point
+   * is guaranteed to be != color of its nearest neighbor.
+   */
+  rmm::device_uvector<value_idx> nn_colors(n_rows, stream);
+  rmm::device_uvector<raft::KeyValuePair<value_idx, value_t>> temp_inds_dists(n_rows, stream);
+  rmm::device_uvector<value_idx> src_indices(n_rows, stream);
+
+  perform_1nn_GF(temp_inds_dists.data(),
+              nn_colors.data(),
+              colors.data(),
+              X1,
+              X2,
+              n_rows,
+              n_cols1,
+              n_cols2,
+              stream,
+              reduction_op);
+
+  /**
+   * Sort data points by color (neighbors are not sorted)
+   */
+  // max_color + 1 = number of connected components
+  // sort nn_colors by key w/ original colors
+  sort_by_color(
+    colors.data(), nn_colors.data(), temp_inds_dists.data(), src_indices.data(), n_rows, stream);
+
+  /**
+   * Take the min for any duplicate colors
+   */
+  // Compute mask of duplicates
+  rmm::device_uvector<value_idx> out_index(n_rows + 1, stream);
+  raft::sparse::op::compute_duplicates_mask(
+    out_index.data(), colors.data(), nn_colors.data(), n_rows, stream);
+
+  thrust::exclusive_scan(handle.get_thrust_policy(),
+                         out_index.data(),
+                         out_index.data() + out_index.size(),
+                         out_index.data());
+
+  // compute final size
+  value_idx size = 0;
+  raft::update_host(&size, out_index.data() + (out_index.size() - 1), 1, stream);
+  handle.sync_stream(stream);
+
+  size++;
+
+  raft::sparse::COO<value_t, value_idx> min_edges(stream);
+  min_edges.allocate(size, n_rows, n_rows, true, stream);
+
+  min_components_by_color(
+    min_edges, out_index.data(), src_indices.data(), temp_inds_dists.data(), n_rows, stream);
+
+  /**
+   * Symmetrize resulting edge list
+   */
+  raft::sparse::linalg::symmetrize(
+    handle, min_edges.rows(), min_edges.cols(), min_edges.vals(), n_rows, n_rows, size, out);
 }
 
 /**

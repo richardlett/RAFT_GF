@@ -76,4 +76,21 @@ void connect_components(
   detail::connect_components(handle, out, X, orig_colors, n_rows, n_cols, reduction_op, metric);
 }
 
+template <typename value_idx, typename value_t, typename red_op>
+void connect_components_GF(
+  const raft::handle_t& handle,
+  raft::sparse::COO<value_t, value_idx>& out,
+  const value_t* X1,
+    const value_t* X2,
+  const value_idx* orig_colors,
+  size_t n_rows,
+  size_t n_cols1,
+    size_t n_cols2,
+  red_op reduction_op,
+  raft::distance::DistanceType metric = raft::distance::DistanceType::L2SqrtExpanded)
+{
+  detail::connect_components_GF(handle, out, X1, X2, orig_colors, n_rows, n_cols1, n_cols2, reduction_op, metric);
+}
+
+
 };  // end namespace raft::sparse::neighbors

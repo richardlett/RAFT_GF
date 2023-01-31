@@ -343,7 +343,7 @@ struct PairwiseDistances_GF : public BaseClass {
                        EpilogueLambda _epilog_op,
                        FinalLambda _fin_op,
                        rowEpilogueLambda _rowEpilog_op)
-    : BaseClass(_x1, _x2, _y1, _y2, _m, _n, _k1, _k2, _smem),
+    : BaseClass( _x1, _x2,_y1,_y2,_m,_n,_k1,_k2,_k1,_k2, _k1,_k2, _n, _smem),
       xn(_xn),
       yn(_yn),
       yBase1(_y1),

@@ -392,21 +392,59 @@ struct Contractions_NT_GF {
    * @param[in] _k number of cols of X and Y
    * @param[in] _smem shared memory region used during computations
    */
-  DI Contractions_NT_GF(const DataT* _x1, const DataT* _x2, const DataT* _y1, const DataT* _y2, IdxT _m, IdxT _n, IdxT _k1, IdxT _k2, char* _smem)
+  // DI Contractions_NT(const DataT* _x, const DataT* _y, IdxT _m, IdxT _n, IdxT _k, char* _smem)
+  //   : m(_m),
+  //     n(_n),
+  //     k(_k),
+  //     lda(_k),
+  //     ldb(_k),
+  //     xrowid(IdxT(blockIdx.x) * P::Mblk + threadIdx.x / P::LdgThRow),
+  //     yrowid(IdxT(blockIdx.y) * P::Nblk + threadIdx.x / P::LdgThRow),
+  //     x(_x + xrowid * lda),
+  //     y(_y + yrowid * ldb),
+  //     srowid(threadIdx.x / P::LdgThRow),
+  //     scolid((threadIdx.x % P::LdgThRow) * P::Veclen),
+  //     accrowid(threadIdx.x / P::AccThCols),
+  //     acccolid(threadIdx.x % P::AccThCols),
+  //     sx((DataT*)_smem),
+  //     sy(&(sx[P::SmemPageX])),
+  //     pageWr(0),
+  //     pageRd(0)
+  // {
+  // }
+
+  /**
+   * @brief Ctor
+   * @param[in] _x X matrix. [on device] [dim = _m x _k] [row-major]
+   * @param[in] _y Y matrix. [on device] [dim = _n x _k] [row-major]
+   * @param[in] _m number of rows of X
+   * @param[in] _n number of rows of Y
+   * @param[in] _k number of cols of X and Y
+   * @param[in] _smem shared memory region used during computations
+   */
+  DI Contractions_NT_GF(const DataT* _x1,
+                     const DataT* _x2,
+                     const DataT* _y1,
+                     const DataT* _y2,
+                     IdxT _m,
+                     IdxT _n,
+                     IdxT _k1,
+                     IdxT _k2,
+                     IdxT _lda1,
+                     IdxT _lda2,
+                     IdxT _ldb1,
+                     IdxT _ldb2,
+                     IdxT _ldd,
+                     char* _smem)
     : m(_m),
       n(_n),
       k1(_k1),
       k2(_k2),
-      lda1(_k1),
-      ldb1(_k1),
-      lda2(_k2),
-      ldb2(_k2),
-      xrowid(IdxT(blockIdx.x) * P::Mblk + threadIdx.x / P::LdgThRow),
-      yrowid(IdxT(blockIdx.y) * P::Nblk + threadIdx.x / P::LdgThRow),
-      x1(_x1 + xrowid * lda1),
-      y1(_y1 + yrowid * ldb1),
-      x2(_x2 + xrowid * lda2),
-      y2(_y2 + yrowid * ldb2),
+      lda1(_lda1),
+      lda2(_lda2),
+      ldb1(_ldb1),
+      ldb2(_ldb2),
+      ldd(_ldd),
       srowid(threadIdx.x / P::LdgThRow),
       scolid((threadIdx.x % P::LdgThRow) * P::Veclen),
       accrowid(threadIdx.x / P::AccThCols),
@@ -416,7 +454,24 @@ struct Contractions_NT_GF {
       pageWr(0),
       pageRd(0)
   {
+    if (isRowMajor) {
+      xrowid = IdxT(blockIdx.y) * P::Mblk + srowid;
+      yrowid = IdxT(blockIdx.x) * P::Nblk + srowid;
+      x1      = _x1 + xrowid * lda1;
+      x2      = _x2 + xrowid * lda2;
+      y1      = _y1 + yrowid * ldb1;
+      y2      = _y2 + yrowid * ldb2;
+    } else {
+      xrowid = IdxT(blockIdx.y) * P::Mblk;
+      yrowid = IdxT(blockIdx.x) * P::Nblk;
+      x1      = _x1 + xrowid + srowid * lda1;
+      x2      = _x2 + xrowid + srowid * lda2;
+      y1      = _y1 + yrowid + srowid * ldb1;
+      y2      = _y1 + yrowid + srowid * ldb2;
+    }
   }
+
+  
 
   // /**
   //  * @brief Ctor

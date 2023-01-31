@@ -317,11 +317,11 @@ __global__ __launch_bounds__(P::Nthreads, 2) void fusedL2NNkernel_GF(OutT* min,
 #pragma unroll
         for (int j = 0; j < P::AccColsPerTh; ++j) {
           auto acc_ij = acc[i][j];
-          acc[i][j]   = acc_ij > DataT{0} ? raft::mySqrt(acc_ij) : DataT{0};
+          acc[i][j]   = acc_ij; // > DataT{0} ? raft::mySqrt(acc_ij) : DataT{0};
         }
       }
     }
-
+  //FIXME
     // intra thread reduce
     const auto acccolid = threadIdx.x % P::AccThCols;
     const auto accrowid = threadIdx.x / P::AccThCols;

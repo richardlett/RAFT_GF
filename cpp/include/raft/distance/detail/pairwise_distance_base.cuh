@@ -363,25 +363,105 @@ struct PairwiseDistances_GF : public BaseClass {
          gridStrideY += P::Mblk * gridDim.y) {
       for (auto gridStrideX = blockIdx.x * P::Nblk; gridStrideX < this->n;
            gridStrideX += P::Nblk * gridDim.x) {
-        if (gridStrideX !=  blockIdx.x * P::Nblk) {
+
+        //
+        //PROLOG  - Load pipeline
+        //
+
+        // Prime data pipeline pipeline (true in first run) - ldgXY1:  load matrices X1,Y1 from global into registers
+        if (gridStrideX == blockIdx.x * P::Nblk) { this->ldgXY1(0); }
+        // Zero first set of accumulation registers
+        #pragma unroll
+            for (int i = 0; i < P::AccRowsPerTh; ++i) {
+        #pragma unroll
+              for (int j = 0; j < P::AccColsPerTh; ++j) {
+                acc[i][j] = BaseClass::Zero;
+              }
+            }
+        // store X1,Y1 data loaded from registers  into shared memory
+        this->stsXY1();
+        // make sure everyone is caught up for shared memory reading
+        __syncthreads();
+
+        // Pipeline is now primed, change write so we can simulatenly load new data 
+        this->pageWr ^= 1;
+
+        // LOOP over K
+
+        for (int kidx = P::Kblk; kidx < this->k1; kidx += P::Kblk) {
+          // load next k-block from global into registers set A
+          this->ldgXY1(kidx);
+          // accumulate into acc[i][j] from shared memory buffer "Buffer1" (not real name)
+          accumulate1();  // on the previous k-block
+
+          // Store loads from  register A into Buffer 2
+          this->stsXY1();
+
+          __syncthreads();
+
+          // swap buffer1 and buffer2
+          this->pageWr ^= 1;
+          this->pageRd ^= 1;
         }
-        prolog1(gridStrideX, gridStrideY);
-        loop1();
-        prolog2(gridStrideX, gridStrideY);
-        loop2();
+
+        // load first k-block  of X2, Y2
+        this->ldgXY2(0);
+
+        // do last accumulate for X1,Y1,
+        accumulate1();  // last iteration
+
+
+        #pragma unroll
+        for (int i = 0; i < P::AccRowsPerTh; ++i) {
+          #pragma unroll
+          for (int j = 0; j < P::AccColsPerTh; ++j) {
+            acc2[i][j] = BaseClass::Zero;
+          }
+        }
+
+        //store first k-block of x2,y2,  into buffer 1 (simulatenaly, we accumulate k block of x1,y1 with buffer 2) (wlog, reverse 1,2)
+        this->stsXY2();
+
+        __syncthreads();
+        this->pageWr ^= 1;
+        this->pageRd ^= 1;
+        // end prolog x2,y2
+        
+        for (int kidx = P::Kblk; kidx < this->k2; kidx += P::Kblk) {
+          this->ldgXY2(kidx);
+          accumulate2();  // on the previous k-block
+          this->stsXY2();
+          __syncthreads();
+          this->pageWr ^= 1;
+          this->pageRd ^= 1;
+        }
+        accumulate2();  // last iteration
+        // This is needed for making sure next grid stride of
+        // uses previously accumulated buffer so
+        // it doesn't make shmem dirty until previous iteration
+        // is complete.
+        this->pageRd ^= 1;
+        __threadfence();
+
+        __syncthreads();
         epilog(gridStrideX, gridStrideY);
+        __syncthreads();
+        __threadfence();
+
       }
       rowEpilog_op(gridStrideY);
+      __threadfence();
+      
     }
   }
 
  private:
-  DI void updateIndicesY()
+    DI void updateIndicesY()
   {
     const auto stride = P::Nblk * gridDim.x;
     if (isRowMajor) {
-      this->y1 += stride * this->ldb;
-      this->y2 += stride * this->ldb;
+      this->y1 += stride * this->ldb1;
+      this->y2 += stride * this->ldb2;
 
     } else {
       this->y1 += stride;
@@ -394,26 +474,22 @@ struct PairwiseDistances_GF : public BaseClass {
   {
     const auto stride = P::Mblk * gridDim.y;
     if (isRowMajor) {
-      this->x1 += stride * this->lda;
-      this->x2 += stride * this->lda;
+      this->x1 += stride * this->lda1;
+      this->x2 += stride * this->lda2;
 
       this->yrowid = IdxT(blockIdx.x) * P::Nblk + this->srowid;
-      this->y1      = yBase1 + this->yrowid * this->ldb;
-      //fixme ybase -> ybase{1,2}?
-      this->y2      = yBase2 + this->yrowid * this->ldb;
-
+      this->y1      = yBase1 + this->yrowid * this->ldb1;
+      this->y2      = yBase2 + this->yrowid * this->ldb2;
     } else {
       this->x1 += stride;
       this->x2 += stride;
-
       this->yrowid = IdxT(blockIdx.x) * P::Nblk;
-      //fixme see aboev
-      this->y1      = yBase1 + this->yrowid + this->srowid * this->ldb;
-      this->y2      = yBase2 + this->yrowid + this->srowid * this->ldb;
-
+      this->y1      = yBase1 + this->yrowid + this->srowid * this->ldb1;
+      this->y2      = yBase2 + this->yrowid + this->srowid * this->ldb2;
     }
     this->xrowid += stride;
   }
+
 
   DI void ldgNextGridStride(IdxT gridStrideX, IdxT gridStrideY)
   {
@@ -429,7 +505,8 @@ struct PairwiseDistances_GF : public BaseClass {
 
   DI void prolog1(IdxT gridStrideX, IdxT gridStrideY)
   {
-    if (gridStrideX == blockIdx.x * P::Nblk) { this->ldgXY1(0); }
+    this->ldgXY1(0);
+    //if (gridStrideX == blockIdx.x * P::Nblk) { this->ldgXY1(0); }
 
 #pragma unroll
     for (int i = 0; i < P::AccRowsPerTh; ++i) {
@@ -446,7 +523,6 @@ struct PairwiseDistances_GF : public BaseClass {
 
   DI void prolog2(IdxT gridStrideX, IdxT gridStrideY)
   {
-    this->ldgXY2(0);
 
 #pragma unroll
     for (int i = 0; i < P::AccRowsPerTh; ++i) {
@@ -459,6 +535,8 @@ struct PairwiseDistances_GF : public BaseClass {
     this->stsXY();
     __syncthreads();
     this->pageWr ^= 1;
+    this->pageRd ^= 1;
+
   }
 
 
@@ -472,12 +550,13 @@ struct PairwiseDistances_GF : public BaseClass {
       this->pageWr ^= 1;
       this->pageRd ^= 1;
     }
+    this->ldgXY2(0);
     accumulate1();  // last iteration
     // This is needed for making sure next grid stride of
     // non-norm based metrics uses previously accumulated buffer so
     // it doesn't make shmem dirty until previous iteration
     // is complete.
-    this->pageRd ^= 1;
+
   }
 
     DI void loop2()
@@ -509,7 +588,7 @@ struct PairwiseDistances_GF : public BaseClass {
         for (int j = 0; j < P::AccColsPerTh; ++j) {
 #pragma unroll
           for (int v = 0; v < P::Veclen; ++v) {
-            core_op(acc[i][j], this->regx[i][v], this->regy[j][v]);
+            core_op(acc[i][j], this->regx1[i][v], this->regy1[j][v]);
           }
         }
       }
@@ -527,7 +606,7 @@ struct PairwiseDistances_GF : public BaseClass {
         for (int j = 0; j < P::AccColsPerTh; ++j) {
 #pragma unroll
           for (int v = 0; v < P::Veclen; ++v) {
-            core_op(acc2[i][j], this->regx[i][v], this->regy[j][v]);
+            core_op(acc2[i][j], this->regx2[i][v], this->regy2[j][v]);
           }
         }
       }
@@ -538,16 +617,50 @@ struct PairwiseDistances_GF : public BaseClass {
   {
    
     // Overlap ldg with epilog computation
+
+     DataT* sxNorm = (DataT*)(&smem[P::SmemSize]);
+      DataT* syNorm = (&sxNorm[P::Mblk]);
+
+      // Load x & y norms required by this threadblock in shmem buffer
+      if (gridStrideX == blockIdx.x * P::Nblk) {
+        for (int i = threadIdx.x; i < P::Mblk; i += P::Nthreads) {
+          auto idx  = gridStrideY + i;
+          sxNorm[i] = idx < this->m ? xn[idx] : 0;
+        }
+      }
+
+      for (int i = threadIdx.x; i < P::Nblk; i += P::Nthreads) {
+        auto idx  = gridStrideX + i;
+        syNorm[i] = idx < this->n ? yn[idx] : 0;
+      }
+
+      __syncthreads();
+
+      DataT regxn[P::AccRowsPerTh], regyn[P::AccColsPerTh];
+#pragma unroll
+      for (int i = 0; i < P::AccRowsPerTh; ++i) {
+        regxn[i] = sxNorm[i * P::AccThRows + (threadIdx.x / P::AccThCols)];
+      }
+#pragma unroll
+      for (int i = 0; i < P::AccColsPerTh; ++i) {
+        regyn[i] = syNorm[i * P::AccThCols + (threadIdx.x % P::AccThCols)];
+      }
+
+    
     ldgNextGridStride(gridStrideX, gridStrideY);
     #pragma unroll
     for (int i = 0; i < P::AccRowsPerTh; ++i) {
       #pragma unroll
       for (int j = 0; j < P::AccColsPerTh; ++j) {
-        acc[i][j] *= acc2[i][j];
+        acc2[i][j] *= acc[i][j];
       }
     }
+    __syncthreads();
+    __threadfence();
 
-    epilog_op(acc, nullptr, nullptr, gridStrideX, gridStrideY);
+
+
+    epilog_op(acc2, regxn, regyn, gridStrideX, gridStrideY);
   
   }
 };  // struct PairwiseDistances

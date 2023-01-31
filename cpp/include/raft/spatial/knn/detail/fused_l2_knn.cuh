@@ -880,7 +880,8 @@ __global__ __launch_bounds__(Policy::Nthreads, 2) void fusedL2kNN_GF(const DataT
                                             decltype(rowEpilog_lambda),
                                             isRowMajor,
                                             false>
-    obj(x1,
+
+                                                obj(x1,
         x2,
         y1,
         y2,
@@ -889,9 +890,7 @@ __global__ __launch_bounds__(Policy::Nthreads, 2) void fusedL2kNN_GF(const DataT
         k1,
         k2,
         lda1,
-        lda2,
         ldb1,
-        ldb2,
         ldd,
         _xn,
         _yn,
@@ -901,6 +900,27 @@ __global__ __launch_bounds__(Policy::Nthreads, 2) void fusedL2kNN_GF(const DataT
         epilog_lambda,
         fin_op,
         rowEpilog_lambda);
+    // obj(x1,
+    //     x2,
+    //     y1,
+    //     y2,
+    //     m,
+    //     n,
+    //     k1,
+    //     k2,
+    //     lda1,
+    //     lda2,
+    //     ldb1,
+    //     ldb2,
+    //     ldd,
+    //     _xn,
+    //     _yn,
+    //     nullptr,
+    //     smem,
+    //     core_op,
+    //     epilog_lambda,
+    //     fin_op,
+    //     rowEpilog_lambda);
   obj.run();
 }
 

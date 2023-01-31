@@ -216,7 +216,7 @@ void perform_1nn(raft::KeyValuePair<value_idx, value_t>* kvp,
   thrust::transform(rmm::exec_policy(stream), kvp, kvp + n_rows, nn_colors, extract_colors_op);
 }
 
-
+#include <stdio.h>
 /**
  * Compute the cross-component 1-nearest neighbors for each row in X using
  * the given array of components
@@ -245,7 +245,11 @@ void perform_1nn_GF(raft::KeyValuePair<value_idx, value_t>* kvp,
 {
   rmm::device_uvector<int> workspace(n_rows, stream);
   rmm::device_uvector<value_t> x_norm(n_rows, stream);
-
+  if (n_cols2 % 16 != 0 || n_cols1 % 16 != 0) {
+    std::cerr << "nscols " <<  n_cols1 << " ncols2 " << n_cols2 << std::endl;
+  }
+  ASSERT(n_cols1 % 16 == 0, "ncols");
+  ASSERT(n_cols2 % 16 == 0, "ncols");
   //raft::linalg::rowNorm(x_norm.data(), X, n_cols, n_rows, raft::linalg::L2Norm, true, stream);
 
   raft::distance::fusedL2NN_GF<value_t, raft::KeyValuePair<value_idx, value_t>, value_idx>(
@@ -388,6 +392,11 @@ void connect_components_GF(
   red_op reduction_op,
   raft::distance::DistanceType metric = raft::distance::DistanceType::L2SqrtExpanded)
 {
+  if (n_cols2 % 16 != 0 || n_cols1 % 16 != 0) {
+    std::cerr << "nscols " <<  n_cols1 << " ncols2 " << n_cols2 << std::endl;
+  }
+  ASSERT(n_cols1 % 16 == 0, "ncols");
+  ASSERT(n_cols2 % 16 == 0, "ncols");
   auto stream = handle.get_stream();
 
   RAFT_EXPECTS(metric == raft::distance::DistanceType::L2SqrtExpanded,
@@ -409,6 +418,11 @@ void connect_components_GF(
   rmm::device_uvector<value_idx> nn_colors(n_rows, stream);
   rmm::device_uvector<raft::KeyValuePair<value_idx, value_t>> temp_inds_dists(n_rows, stream);
   rmm::device_uvector<value_idx> src_indices(n_rows, stream);
+  if (n_cols2 % 16 != 0 || n_cols1 % 16 != 0) {
+    std::cerr << "nscols " <<  n_cols1 << " ncols2 " << n_cols2 << std::endl;
+  }
+  ASSERT(n_cols1 % 16 == 0, "ncols");
+  ASSERT(n_cols2 % 16 == 0, "ncols");
 
   perform_1nn_GF(temp_inds_dists.data(),
               nn_colors.data(),

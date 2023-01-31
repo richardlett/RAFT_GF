@@ -365,13 +365,20 @@ struct Contractions_NT_GF {
   int pageRd;
 
   /** block of X data loaded from smem after `ldsXY()` ; (shared) */
-  DataT regx[P::AccRowsPerTh][P::Veclen];
+  DataT regx1[P::AccRowsPerTh][P::Veclen];
+  DataT regx2[P::AccRowsPerTh][P::Veclen];
+
   /** block of Y data loaded from smem after `ldsXY()` (shared) */
-  DataT regy[P::AccColsPerTh][P::Veclen];
+  DataT regy1[P::AccColsPerTh][P::Veclen];
+  DataT regy2[P::AccColsPerTh][P::Veclen];
+
   /** block of X data loaded from global mem after `ldgXY()`  (shared) */
-  DataT ldgDataX[P::LdgPerThX][P::Veclen];
+  DataT ldgDataX1[P::LdgPerThX][P::Veclen];
+  DataT ldgDataX2[P::LdgPerThX][P::Veclen];
+
   /** block of Y data loaded from global mem after `ldgXY()` (shared) */
-  DataT ldgDataY[P::LdgPerThY][P::Veclen];
+  DataT ldgDataY1[P::LdgPerThY][P::Veclen];
+  DataT ldgDataY2[P::LdgPerThY][P::Veclen];
 
   static constexpr DataT Zero = (DataT)0;
 
@@ -478,10 +485,16 @@ struct Contractions_NT_GF {
   //  * @brief Store current block of X/Y from registers to smem
   //  * @param[in] kidx current start index of k to be loaded
   //  */
-  DI void stsXY()
+  DI void stsXY1()
   {
-    stsX(sx + pageWr * P::SmemPage);
-    stsY(sy + pageWr * P::SmemPage);
+    stsX1(sx + pageWr * P::SmemPage);
+    stsY1(sy + pageWr * P::SmemPage);
+  }
+
+    DI void stsXY2()
+  {
+    stsX2(sx + pageWr * P::SmemPage);
+    stsY2(sy + pageWr * P::SmemPage);
   }
 
 
@@ -489,11 +502,22 @@ struct Contractions_NT_GF {
    * @brief Load X and Y block from shared memory to registers
    * @param[in] kidx k value from the current k-block to be loaded from smem
    */
-  DI void ldsXY(int kidx)
+  DI void ldsXY1(int kidx)
   {
-    ldsX(kidx, sx + pageRd * P::SmemPage);
-    ldsY(kidx, sy + pageRd * P::SmemPage);
+    ldsX1(kidx, sx + pageRd * P::SmemPage);
+    ldsY1(kidx, sy + pageRd * P::SmemPage);
   }
+
+    /**
+   * @brief Load X and Y block from shared memory to registers
+   * @param[in] kidx k value from the current k-block to be loaded from smem
+   */
+  DI void ldsXY2(int kidx)
+  {
+    ldsX2(kidx, sx + pageRd * P::SmemPage);
+    ldsY2(kidx, sy + pageRd * P::SmemPage);
+  }
+
 
  private:
   DI void ldgX1(IdxT kidx)
@@ -504,11 +528,11 @@ struct Contractions_NT_GF {
 #pragma unroll
       for (int i = 0; i < P::LdgPerThX; ++i) {
         if (koffset < lda1 && (xrowid + i * P::LdgRowsX) < numRows) {
-          ldg(ldgDataX[i], x1 + i * P::LdgRowsX * lda1 + koffset);
+          ldg(ldgDataX1[i], x1 + i * P::LdgRowsX * lda1 + koffset);
         } else {
 #pragma unroll
           for (int j = 0; j < P::Veclen; ++j) {
-            ldgDataX[i][j] = Zero;
+            ldgDataX1[i][j] = Zero;
           }
         }
       }
@@ -518,11 +542,11 @@ struct Contractions_NT_GF {
 #pragma unroll
       for (int i = 0; i < P::LdgPerThX; ++i) {
         if ((koffset + xrowid) < lda1 && (srowid + kidx + i * P::LdgRowsX) < numRows) {
-          ldg(ldgDataX[i], x1 + (kidx + i * P::LdgRowsX) * lda1 + koffset);
+          ldg(ldgDataX1[i], x1 + (kidx + i * P::LdgRowsX) * lda1 + koffset);
         } else {
 #pragma unroll
           for (int j = 0; j < P::Veclen; ++j) {
-            ldgDataX[i][j] = Zero;
+            ldgDataX1[i][j] = Zero;
           }
         }
       }
@@ -537,11 +561,11 @@ struct Contractions_NT_GF {
 #pragma unroll
       for (int i = 0; i < P::LdgPerThX; ++i) {
         if (koffset < lda2 && (xrowid + i * P::LdgRowsX) < numRows) {
-          ldg(ldgDataX[i], x2 + i * P::LdgRowsX * lda2 + koffset);
+          ldg(ldgDataX2[i], x2 + i * P::LdgRowsX * lda2 + koffset);
         } else {
 #pragma unroll
           for (int j = 0; j < P::Veclen; ++j) {
-            ldgDataX[i][j] = Zero;
+            ldgDataX2[i][j] = Zero;
           }
         }
       }
@@ -551,11 +575,11 @@ struct Contractions_NT_GF {
 #pragma unroll
       for (int i = 0; i < P::LdgPerThX; ++i) {
         if ((koffset + xrowid) < lda2 && (srowid + kidx + i * P::LdgRowsX) < numRows) {
-          ldg(ldgDataX[i], x2 + (kidx + i * P::LdgRowsX) * lda2 + koffset);
+          ldg(ldgDataX2[i], x2 + (kidx + i * P::LdgRowsX) * lda2 + koffset);
         } else {
 #pragma unroll
           for (int j = 0; j < P::Veclen; ++j) {
-            ldgDataX[i][j] = Zero;
+            ldgDataX2[i][j] = Zero;
           }
         }
       }
@@ -570,11 +594,11 @@ struct Contractions_NT_GF {
 #pragma unroll
       for (int i = 0; i < P::LdgPerThY; ++i) {
         if (koffset < ldb1 && (yrowid + i * P::LdgRowsY) < numRows) {
-          ldg(ldgDataY[i], y1 + i * P::LdgRowsY * ldb1 + koffset);
+          ldg(ldgDataY1[i], y1 + i * P::LdgRowsY * ldb1 + koffset);
         } else {
 #pragma unroll
           for (int j = 0; j < P::Veclen; ++j) {
-            ldgDataY[i][j] = Zero;
+            ldgDataY1[i][j] = Zero;
           }
         }
       }
@@ -584,11 +608,11 @@ struct Contractions_NT_GF {
 #pragma unroll
       for (int i = 0; i < P::LdgPerThY; ++i) {
         if ((koffset + yrowid) < ldb1 && (srowid + kidx + i * P::LdgRowsY) < numRows) {
-          ldg(ldgDataY[i], y1 + (kidx + i * P::LdgRowsY) * ldb1 + koffset);
+          ldg(ldgDataY1[i], y1 + (kidx + i * P::LdgRowsY) * ldb1 + koffset);
         } else {
 #pragma unroll
           for (int j = 0; j < P::Veclen; ++j) {
-            ldgDataY[i][j] = Zero;
+            ldgDataY1[i][j] = Zero;
           }
         }
       }
@@ -603,11 +627,11 @@ struct Contractions_NT_GF {
 #pragma unroll
       for (int i = 0; i < P::LdgPerThY; ++i) {
         if (koffset < ldb2 && (yrowid + i * P::LdgRowsY) < numRows) {
-          ldg(ldgDataY[i], y2 + i * P::LdgRowsY * ldb2 + koffset);
+          ldg(ldgDataY2[i], y2 + i * P::LdgRowsY * ldb2 + koffset);
         } else {
 #pragma unroll
           for (int j = 0; j < P::Veclen; ++j) {
-            ldgDataY[i][j] = Zero;
+            ldgDataY2[i][j] = Zero;
           }
         }
       }
@@ -617,42 +641,59 @@ struct Contractions_NT_GF {
 #pragma unroll
       for (int i = 0; i < P::LdgPerThY; ++i) {
         if ((koffset + yrowid) < ldb2 && (srowid + kidx + i * P::LdgRowsY) < numRows) {
-          ldg(ldgDataY[i], y2 + (kidx + i * P::LdgRowsY) * ldb2 + koffset);
+          ldg(ldgDataY2[i], y2 + (kidx + i * P::LdgRowsY) * ldb2 + koffset);
         } else {
 #pragma unroll
           for (int j = 0; j < P::Veclen; ++j) {
-            ldgDataY[i][j] = Zero;
+            ldgDataY2[i][j] = Zero;
           }
         }
       }
     }
   }
 
-  DI void stsX(DataT* smem)
+  DI void stsX1(DataT* smem)
   {
     auto* saddr = smem + srowid * P::SmemStride + scolid;
 #pragma unroll
     for (int i = 0; i < P::LdgPerThX; ++i) {
-      sts(saddr + i * P::LdgRowsX * P::SmemStride, ldgDataX[i]);
+      sts(saddr + i * P::LdgRowsX * P::SmemStride, ldgDataX1[i]);
     }
   }
 
-  DI void stsY(DataT* smem)
+    DI void stsX2(DataT* smem)
+  {
+    auto* saddr = smem + srowid * P::SmemStride + scolid;
+#pragma unroll
+    for (int i = 0; i < P::LdgPerThX; ++i) {
+      sts(saddr + i * P::LdgRowsX * P::SmemStride, ldgDataX2[i]);
+    }
+  }
+
+  DI void stsY1(DataT* smem)
   {
     auto* saddr = smem + srowid * P::SmemStride + scolid;
 #pragma unroll
     for (int i = 0; i < P::LdgPerThY; ++i) {
-      sts(saddr + i * P::LdgRowsY * P::SmemStride, ldgDataY[i]);
+      sts(saddr + i * P::LdgRowsY * P::SmemStride, ldgDataY1[i]);
+    }
+  }
+    DI void stsY2(DataT* smem)
+  {
+    auto* saddr = smem + srowid * P::SmemStride + scolid;
+#pragma unroll
+    for (int i = 0; i < P::LdgPerThY; ++i) {
+      sts(saddr + i * P::LdgRowsY * P::SmemStride, ldgDataY2[i]);
     }
   }
 
-  DI void ldsX(int kidx, DataT* smem)
+  DI void ldsX1(int kidx, DataT* smem)
   {
     if (isRowMajor) {
       auto* saddr = smem + accrowid * P::SmemStride + kidx;
 #pragma unroll
       for (int i = 0; i < P::AccRowsPerTh; ++i) {
-        lds(regx[i], saddr + i * P::AccThRows * P::SmemStride);
+        lds(regx1[i], saddr + i * P::AccThRows * P::SmemStride);
       }
     } else {
       auto* saddr = smem + accrowid + kidx * P::SmemStride;
@@ -660,19 +701,40 @@ struct Contractions_NT_GF {
       for (int i = 0; i < P::AccRowsPerTh; ++i) {
 #pragma unroll
         for (int v = 0; v < P::Veclen; ++v) {
-          regx[i][v] = saddr[i * P::AccThRows + v * P::SmemStride];
+          regx1[i][v] = saddr[i * P::AccThRows + v * P::SmemStride];
         }
       }
     }
   }
 
-  DI void ldsY(int kidx, DataT* smem)
+    DI void ldsX2(int kidx, DataT* smem)
+  {
+    if (isRowMajor) {
+      auto* saddr = smem + accrowid * P::SmemStride + kidx;
+#pragma unroll
+      for (int i = 0; i < P::AccRowsPerTh; ++i) {
+        lds(regx2[i], saddr + i * P::AccThRows * P::SmemStride);
+      }
+    } else {
+      auto* saddr = smem + accrowid + kidx * P::SmemStride;
+#pragma unroll
+      for (int i = 0; i < P::AccRowsPerTh; ++i) {
+#pragma unroll
+        for (int v = 0; v < P::Veclen; ++v) {
+          regx2[i][v] = saddr[i * P::AccThRows + v * P::SmemStride];
+        }
+      }
+    }
+  }
+
+
+  DI void ldsY1(int kidx, DataT* smem)
   {
     if (isRowMajor) {
       auto* saddr = smem + acccolid * P::SmemStride + kidx;
 #pragma unroll
       for (int i = 0; i < P::AccColsPerTh; ++i) {
-        lds(regy[i], saddr + i * P::AccThCols * P::SmemStride);
+        lds(regy1[i], saddr + i * P::AccThCols * P::SmemStride);
       }
     } else {
       auto* saddr = smem + acccolid + kidx * P::SmemStride;
@@ -680,7 +742,27 @@ struct Contractions_NT_GF {
       for (int i = 0; i < P::AccColsPerTh; ++i) {
 #pragma unroll
         for (int v = 0; v < P::Veclen; ++v) {
-          regy[i][v] = saddr[i * P::AccThCols + v * P::SmemStride];
+          regy1[i][v] = saddr[i * P::AccThCols + v * P::SmemStride];
+        }
+      }
+    }
+  }
+
+  DI void ldsY2(int kidx, DataT* smem)
+  {
+    if (isRowMajor) {
+      auto* saddr = smem + acccolid * P::SmemStride + kidx;
+#pragma unroll
+      for (int i = 0; i < P::AccColsPerTh; ++i) {
+        lds(regy2[i], saddr + i * P::AccThCols * P::SmemStride);
+      }
+    } else {
+      auto* saddr = smem + acccolid + kidx * P::SmemStride;
+#pragma unroll
+      for (int i = 0; i < P::AccColsPerTh; ++i) {
+#pragma unroll
+        for (int v = 0; v < P::Veclen; ++v) {
+          regy2[i][v] = saddr[i * P::AccThCols + v * P::SmemStride];
         }
       }
     }

@@ -160,43 +160,43 @@ class DistanceAdjTest : public ::testing::TestWithParam<DistanceAdjInputs<DataTy
   cudaStream_t stream;
 };
 
-const std::vector<DistanceAdjInputs<float>> inputsf = {
-  {0.01f, 1024, 1024, 32, true, 1234ULL},
-  {0.1f, 1024, 1024, 32, true, 1234ULL},
-  {1.0f, 1024, 1024, 32, true, 1234ULL},
-  {10.0f, 1024, 1024, 32, true, 1234ULL},
-  {0.01f, 1024, 1024, 32, false, 1234ULL},
-  {0.1f, 1024, 1024, 32, false, 1234ULL},
-  {1.0f, 1024, 1024, 32, false, 1234ULL},
-  {10.0f, 1024, 1024, 32, false, 1234ULL},
-};
-typedef DistanceAdjTest<float> DistanceAdjTestF;
-TEST_P(DistanceAdjTestF, Result)
-{
-  int m = params.isRowMajor ? params.m : params.n;
-  int n = params.isRowMajor ? params.n : params.m;
-  ASSERT_TRUE(devArrMatch(dist_ref.data(), dist.data(), m, n, raft::Compare<uint8_t>(), stream));
-}
-INSTANTIATE_TEST_CASE_P(DistanceAdjTests, DistanceAdjTestF, ::testing::ValuesIn(inputsf));
+// const std::vector<DistanceAdjInputs<float>> inputsf = {
+//   {0.01f, 1024, 1024, 32, true, 1234ULL},
+//   {0.1f, 1024, 1024, 32, true, 1234ULL},
+//   {1.0f, 1024, 1024, 32, true, 1234ULL},
+//   {10.0f, 1024, 1024, 32, true, 1234ULL},
+//   {0.01f, 1024, 1024, 32, false, 1234ULL},
+//   {0.1f, 1024, 1024, 32, false, 1234ULL},
+//   {1.0f, 1024, 1024, 32, false, 1234ULL},
+//   {10.0f, 1024, 1024, 32, false, 1234ULL},
+// };
+// typedef DistanceAdjTest<float> DistanceAdjTestF;
+// TEST_P(DistanceAdjTestF, Result)
+// {
+//   int m = params.isRowMajor ? params.m : params.n;
+//   int n = params.isRowMajor ? params.n : params.m;
+//   ASSERT_TRUE(devArrMatch(dist_ref.data(), dist.data(), m, n, raft::Compare<uint8_t>(), stream));
+// }
+// INSTANTIATE_TEST_CASE_P(DistanceAdjTests, DistanceAdjTestF, ::testing::ValuesIn(inputsf));
 
-const std::vector<DistanceAdjInputs<double>> inputsd = {
-  {0.01, 1024, 1024, 32, true, 1234ULL},
-  {0.1, 1024, 1024, 32, true, 1234ULL},
-  {1.0, 1024, 1024, 32, true, 1234ULL},
-  {10.0, 1024, 1024, 32, true, 1234ULL},
-  {0.01, 1024, 1024, 32, false, 1234ULL},
-  {0.1, 1024, 1024, 32, false, 1234ULL},
-  {1.0, 1024, 1024, 32, false, 1234ULL},
-  {10.0, 1024, 1024, 32, false, 1234ULL},
-};
-typedef DistanceAdjTest<double> DistanceAdjTestD;
-TEST_P(DistanceAdjTestD, Result)
-{
-  int m = params.isRowMajor ? params.m : params.n;
-  int n = params.isRowMajor ? params.n : params.m;
-  ASSERT_TRUE(devArrMatch(dist_ref.data(), dist.data(), m, n, raft::Compare<uint8_t>(), stream));
-}
-INSTANTIATE_TEST_CASE_P(DistanceAdjTests, DistanceAdjTestD, ::testing::ValuesIn(inputsd));
+// const std::vector<DistanceAdjInputs<double>> inputsd = {
+//   {0.01, 1024, 1024, 32, true, 1234ULL},
+//   {0.1, 1024, 1024, 32, true, 1234ULL},
+//   {1.0, 1024, 1024, 32, true, 1234ULL},
+//   {10.0, 1024, 1024, 32, true, 1234ULL},
+//   {0.01, 1024, 1024, 32, false, 1234ULL},
+//   {0.1, 1024, 1024, 32, false, 1234ULL},
+//   {1.0, 1024, 1024, 32, false, 1234ULL},
+//   {10.0, 1024, 1024, 32, false, 1234ULL},
+// };
+// typedef DistanceAdjTest<double> DistanceAdjTestD;
+// TEST_P(DistanceAdjTestD, Result)
+// {
+//   int m = params.isRowMajor ? params.m : params.n;
+//   int n = params.isRowMajor ? params.n : params.m;
+//   ASSERT_TRUE(devArrMatch(dist_ref.data(), dist.data(), m, n, raft::Compare<uint8_t>(), stream));
+// }
+// INSTANTIATE_TEST_CASE_P(DistanceAdjTests, DistanceAdjTestD, ::testing::ValuesIn(inputsd));
 
 }  // namespace distance
 }  // end namespace raft

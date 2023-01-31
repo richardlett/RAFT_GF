@@ -89,8 +89,8 @@ void initialize(const raft::handle_t& handle, OutT* min, IdxT m, DataT maxVal, R
 template <typename DataT, typename OutT, typename IdxT, typename ReduceOpT, typename KVPReduceOpT>
 void fusedL2NN_GF(OutT* min,
                const DataT* x1,
-               const DataT* x2,
                const DataT* y1,
+               const DataT* x2,
                const DataT* y2,
                const DataT* xn,
                const DataT* yn,

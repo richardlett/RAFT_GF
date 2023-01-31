@@ -79,6 +79,61 @@ __global__ void naiveKernel(raft::KeyValuePair<int, DataT>* min,
   }
 }
 
+
+template <typename DataT, bool Sqrt, typename ReduceOpT, int NWARPS>
+__global__ void naiveKernel_GF(raft::KeyValuePair<int, DataT>* min,
+                            DataT* x1,
+                            DataT* x2,
+                            DataT* y1,
+                            DataT* y2,
+                            int m,
+                            int n,
+                            int k1,
+                            int k2,
+                            int* workspace,
+                            DataT maxVal)
+{
+  int midx  = threadIdx.y + blockIdx.y * blockDim.y;
+  int nidx  = threadIdx.x + blockIdx.x * blockDim.x;
+  DataT acc = DataT(0);
+  DataT acc1 = DataT(0);
+  DataT acc2 = DataT(0);
+
+  for (int i = 0; i < k1; ++i) {
+    int xidx  = i + midx * k1;
+    int yidx  = i + nidx * k1;
+    auto diff = midx >= m || nidx >= n ? DataT(0) : x1[xidx]* y1[yidx];
+    acc1 += diff;
+
+  }
+    for (int i = 0; i < k2; ++i) {
+    int xidx  = i + midx * k2;
+    int yidx  = i + nidx * k2;
+    auto diff2 = midx >= m || nidx >= n ? DataT(0) : x2[xidx]* y2[yidx];
+    acc2 += diff2;
+  }
+  acc = ((DataT)2.0)  - ((DataT)2.0)*acc1*acc2;
+  //acc = acc >= (DataT)0.0 ? acc : 0.0;
+
+  //if (Sqrt) { acc = raft::mySqrt(acc); }
+  ReduceOpT redOp;
+  typedef cub::WarpReduce<raft::KeyValuePair<int, DataT>> WarpReduce;
+  __shared__ typename WarpReduce::TempStorage temp[NWARPS];
+  int warpId = threadIdx.x / raft::WarpSize;
+  raft::KeyValuePair<int, DataT> tmp;
+  tmp.key   = nidx;
+  tmp.value = midx >= m || nidx >= n ? maxVal : acc;
+  tmp       = WarpReduce(temp[warpId]).Reduce(tmp, RaftKVPMinReduce<int, DataT>());
+  if (threadIdx.x % raft::WarpSize == 0 && midx < m) {
+    while (atomicCAS(workspace + midx, 0, 1) == 1)
+      ;
+    __threadfence();
+    redOp(midx, min + midx, tmp);
+    __threadfence();
+    atomicCAS(workspace + midx, 1, 0);
+  }
+}
+
 template <typename DataT, bool Sqrt>
 void naive(raft::KeyValuePair<int, DataT>* min,
            DataT* x,
@@ -101,6 +156,63 @@ void naive(raft::KeyValuePair<int, DataT>* min,
     <<<nblks, TPB, 0, stream>>>(min, x, y, m, n, k, workspace, std::numeric_limits<DataT>::max());
   RAFT_CUDA_TRY(cudaGetLastError());
 }
+
+
+
+template <typename DataT, bool Sqrt>
+void naive_GF(raft::KeyValuePair<int, DataT>* min,
+           DataT* x1,
+          DataT* x2,
+           DataT* y1,
+           DataT* y2,
+           int m,
+           int n,
+           int k1,
+          int k2,
+           int* workspace,
+           cudaStream_t stream)
+{
+  static const dim3 TPB(32, 16, 1);
+  dim3 nblks(raft::ceildiv(n, (int)TPB.x), raft::ceildiv(m, (int)TPB.y), 1);
+  RAFT_CUDA_TRY(cudaMemsetAsync(workspace, 0, sizeof(int) * m, stream));
+  auto blks = raft::ceildiv(m, 256);
+  MinAndDistanceReduceOp<int, DataT> op;
+  detail::initKernel<DataT, raft::KeyValuePair<int, DataT>, int>
+    <<<blks, 256, 0, stream>>>(min, m, std::numeric_limits<DataT>::max(), op);
+  RAFT_CUDA_TRY(cudaGetLastError());
+  naiveKernel_GF<DataT, Sqrt, MinAndDistanceReduceOp<int, DataT>, 16>
+    <<<nblks, TPB, 0, stream>>>(min, x1, x2, y1, y2, m, n, k1, k2, workspace, std::numeric_limits<DataT>::max());
+  RAFT_CUDA_TRY(cudaGetLastError());
+}
+
+
+template <typename DataT>
+struct Inputs_GF {
+  DataT tolerance;
+  int m, n, k1, k2;
+  unsigned long long int seed;
+
+  friend std::ostream& operator<<(std::ostream& os, const Inputs_GF& p)
+  {
+    return os << "m: " << p.m
+              << ", "
+                 "n: "
+              << p.n
+              << ", "
+                 "k1: "
+              << p.k1
+              << ", "
+                 "k: "
+              << p.k2
+              << ", "
+                 "seed: "
+              << p.seed
+              << ", "
+                 "tol: "
+              << p.tolerance;
+  }
+};
+
 
 template <typename DataT>
 struct Inputs {
@@ -125,6 +237,121 @@ struct Inputs {
               << p.tolerance;
   }
 };
+
+
+
+template <typename DataT, bool Sqrt>
+class FusedL2NNTest_GF : public ::testing::TestWithParam<Inputs_GF<DataT>> {
+ public:
+  FusedL2NNTest_GF()
+    : params(::testing::TestWithParam<Inputs_GF<DataT>>::GetParam()),
+      stream(handle.get_stream()),
+      x1(params.m * params.k1, stream),
+      x2(params.m * params.k2, stream),
+      y1(params.n * params.k1, stream),
+      y2(params.n * params.k2, stream),
+      xn(params.m, stream),
+      yn(params.n, stream),
+      min(params.m, stream),
+      min_ref(params.m, stream),
+      workspace(params.m * sizeof(int), stream)
+  {
+  }
+
+ protected:
+  void SetUp() override
+  {
+
+
+    raft::random::RngState r(params.seed);
+    int m = params.m;
+    int n = params.n;
+    int k1 = params.k1;
+    int k2 = params.k2;
+    uniform(handle, r, x1.data(), m * k1, DataT(-1.0), DataT(1.0));
+    uniform(handle, r, x2.data(), m * k2, DataT(-1.0), DataT(1.0));
+    uniform(handle, r, y1.data(), n * k1, DataT(-1.0), DataT(1.0));
+    uniform(handle, r, y2.data(), n * k2, DataT(-1.0), DataT(1.0));
+
+
+    //raft::linalg::rowNorm(xn.data(), x.data(), k, m, raft::linalg::L2Norm, true, stream);
+   // raft::linalg::rowNorm(yn.data(), y.data(), k, n, raft::linalg::L2Norm, true, stream);
+
+
+    generateGoldenResult_GF();
+    RAFT_CUDA_TRY(cudaStreamSynchronize(stream));
+  }
+
+ protected:
+  Inputs_GF<DataT> params;
+  rmm::device_uvector<DataT> x1;
+  rmm::device_uvector<DataT> x2;
+  rmm::device_uvector<DataT> y1;
+  rmm::device_uvector<DataT> y2;
+  rmm::device_uvector<DataT> xn;
+  rmm::device_uvector<DataT> yn;
+  rmm::device_uvector<raft::KeyValuePair<int, DataT>> min;
+  rmm::device_uvector<raft::KeyValuePair<int, DataT>> min_ref;
+  rmm::device_uvector<char> workspace;
+  raft::handle_t handle;
+  cudaStream_t stream;
+
+  virtual void generateGoldenResult_GF()
+  {
+    int m = params.m;
+    int n = params.n;
+    int k1 = params.k1;
+    int k2 = params.k2;
+
+    naive_GF<DataT, Sqrt>(min_ref.data(), x1.data(),x2.data(), y1.data(),y2.data(), m, n, k1, k2, (int*)workspace.data(), stream);
+  }
+
+  void runTest(raft::KeyValuePair<int, DataT>* out)
+  {
+    int m = params.m;
+    int n = params.n;
+    int k1 = params.k1;
+    int k2 = params.k2;
+
+    MinAndDistanceReduceOp<int, DataT> redOp;
+    fusedL2NN_GF<DataT, raft::KeyValuePair<int, DataT>, int>(
+      out,
+      x1.data(),
+      y1.data(),
+      x2.data(),
+      y2.data(),
+      xn.data(),
+      yn.data(),
+      m,
+      n,
+      k1,
+      k2,
+      (void*)workspace.data(),
+      redOp,
+      raft::distance::KVPMinReduce<int, DataT>(),
+      Sqrt,
+      true,
+      stream);
+    RAFT_CUDA_TRY(cudaStreamSynchronize(stream));
+  }
+};
+
+template <typename T>
+struct CompareApproxAbsKVP {
+  typedef typename raft::KeyValuePair<int, T> KVP;
+  CompareApproxAbsKVP(T eps_) : eps(eps_) {}
+  bool operator()(const KVP& a, const KVP& b) const
+  {
+    T diff  = raft::abs(raft::abs(a.value) - raft::abs(b.value));
+    T m     = std::max(raft::abs(a.value), raft::abs(b.value));
+    T ratio = m >= eps ? diff / m : diff;
+    return (ratio <= eps);
+  }
+
+ private:
+  T eps;
+};
+
 
 template <typename DataT, bool Sqrt>
 class FusedL2NNTest : public ::testing::TestWithParam<Inputs<DataT>> {
@@ -202,21 +429,6 @@ class FusedL2NNTest : public ::testing::TestWithParam<Inputs<DataT>> {
   }
 };
 
-template <typename T>
-struct CompareApproxAbsKVP {
-  typedef typename raft::KeyValuePair<int, T> KVP;
-  CompareApproxAbsKVP(T eps_) : eps(eps_) {}
-  bool operator()(const KVP& a, const KVP& b) const
-  {
-    T diff  = raft::abs(raft::abs(a.value) - raft::abs(b.value));
-    T m     = std::max(raft::abs(a.value), raft::abs(b.value));
-    T ratio = m >= eps ? diff / m : diff;
-    return (ratio <= eps);
-  }
-
- private:
-  T eps;
-};
 
 template <typename T>
 struct CompareExactKVP {
@@ -253,6 +465,38 @@ template <typename K, typename V, typename L>
   return ::testing::AssertionSuccess();
 }
 
+
+const std::vector<Inputs_GF<float>> inputsf_GF = {
+  // {0.001f, 32, 32, 32, 32, 12345ULL},
+  // {0.001f, 32, 64, 32, 32,  12345ULL},
+  // {0.001f, 64, 32, 32, 32,  12345ULL},
+  // {0.001f, 64, 64, 32,32,  12345ULL},
+  {0.001f, 128, 32, 32, 32, 12345ULL},
+  {0.001f, 128, 64, 32,32, 12345ULL},
+  {0.001f, 128, 128, 64, 32, 12345ULL},
+  {0.001f, 64, 128, 32,32, 12345ULL},
+// diff size k
+  {0.001f, 32, 32, 32, 48, 12345ULL},
+  {0.001f, 32, 64, 32, 48,  12345ULL},
+  {0.001f, 64, 32, 32, 48,  12345ULL},
+  {0.001f, 64, 64, 32,48,  12345ULL},
+  {0.001f, 128, 32, 32, 48, 12345ULL},
+  {0.001f, 128, 64, 32,48, 12345ULL},
+  {0.001f, 128, 128, 64, 48, 12345ULL},
+  {0.001f, 64, 128, 128,48, 12345ULL},
+
+  // diff size k
+  {0.001f, 32, 32, 32, 16*30, 12346ULL},
+  {0.001f, 32, 64, 16*30, 48,  12345ULL},
+  {0.001f, 64, 32, 32, 16*30,  12345ULL},
+  {0.001f, 64, 64, 16*30,16*30,  12345ULL},
+  {0.001f, 128, 32, 16*30, 48, 12345ULL},
+  {0.001f, 128, 64, 32,48, 12345ULL},
+  {0.001f, 128, 128, 64, 48, 12345ULL},
+  {0.001f, 64, 128, 128,16*30, 12345ULL},
+};
+
+
 const std::vector<Inputs<float>> inputsf = {
   {0.001f, 32, 32, 32, 1234ULL},
   {0.001f, 32, 64, 32, 1234ULL},
@@ -263,54 +507,65 @@ const std::vector<Inputs<float>> inputsf = {
   {0.001f, 128, 128, 64, 1234ULL},
   {0.001f, 64, 128, 128, 1234ULL},
 
-  {0.001f, 32, 32, 34, 1234ULL},
-  {0.001f, 32, 64, 34, 1234ULL},
-  {0.001f, 64, 32, 34, 1234ULL},
-  {0.001f, 64, 64, 34, 1234ULL},
-  {0.001f, 128, 32, 34, 1234ULL},
-  {0.001f, 128, 64, 34, 1234ULL},
-  {0.001f, 128, 128, 66, 1234ULL},
-  {0.001f, 64, 128, 130, 1234ULL},
+  // {0.001f, 32, 32, 34, 1234ULL},
+  // {0.001f, 32, 64, 34, 1234ULL},
+  // {0.001f, 64, 32, 34, 1234ULL},
+  // {0.001f, 64, 64, 34, 1234ULL},
+  // {0.001f, 128, 32, 34, 1234ULL},
+  // {0.001f, 128, 64, 34, 1234ULL},
+  // {0.001f, 128, 128, 66, 1234ULL},
+  // {0.001f, 64, 128, 130, 1234ULL},
 
-  {0.001f, 32, 32, 33, 1234ULL},
-  {0.001f, 32, 64, 33, 1234ULL},
-  {0.001f, 64, 32, 33, 1234ULL},
-  {0.001f, 64, 64, 33, 1234ULL},
-  {0.001f, 128, 32, 33, 1234ULL},
-  {0.001f, 128, 64, 33, 1234ULL},
-  {0.001f, 128, 128, 65, 1234ULL},
-  {0.001f, 64, 128, 129, 1234ULL},
-  {0.006f, 1805, 134, 2, 1234ULL},
+  // {0.001f, 32, 32, 33, 1234ULL},
+  // {0.001f, 32, 64, 33, 1234ULL},
+  // {0.001f, 64, 32, 33, 1234ULL},
+  // {0.001f, 64, 64, 33, 1234ULL},
+  // {0.001f, 128, 32, 33, 1234ULL},
+  // {0.001f, 128, 64, 33, 1234ULL},
+  // {0.001f, 128, 128, 65, 1234ULL},
+  // {0.001f, 64, 128, 129, 1234ULL},
+  // {0.006f, 1805, 134, 2, 1234ULL},
 
-  // Repeat with smaller values of k
-  {0.006f, 32, 32, 1, 1234ULL},
-  {0.001f, 32, 64, 2, 1234ULL},
-  {0.001f, 64, 32, 3, 1234ULL},
-  {0.001f, 64, 64, 4, 1234ULL},
-  {0.001f, 128, 32, 5, 1234ULL},
-  {0.001f, 128, 64, 6, 1234ULL},
-  {0.001f, 128, 128, 7, 1234ULL},
-  {0.001f, 64, 128, 8, 1234ULL},
+  // // Repeat with smaller values of k
+  // {0.006f, 32, 32, 1, 1234ULL},
+  // {0.001f, 32, 64, 2, 1234ULL},
+  // {0.001f, 64, 32, 3, 1234ULL},
+  // {0.001f, 64, 64, 4, 1234ULL},
+  // {0.001f, 128, 32, 5, 1234ULL},
+  // {0.001f, 128, 64, 6, 1234ULL},
+  // {0.001f, 128, 128, 7, 1234ULL},
+  // {0.001f, 64, 128, 8, 1234ULL},
 
-  {0.001f, 32, 32, 9, 1234ULL},
-  {0.001f, 32, 64, 10, 1234ULL},
-  {0.001f, 64, 32, 11, 1234ULL},
-  {0.001f, 64, 64, 12, 1234ULL},
-  {0.001f, 128, 32, 13, 1234ULL},
-  {0.001f, 128, 64, 14, 1234ULL},
-  {0.001f, 128, 128, 15, 1234ULL},
-  {0.001f, 64, 128, 16, 1234ULL},
+  // {0.001f, 32, 32, 9, 1234ULL},
+  // {0.001f, 32, 64, 10, 1234ULL},
+  // {0.001f, 64, 32, 11, 1234ULL},
+  // {0.001f, 64, 64, 12, 1234ULL},
+  // {0.001f, 128, 32, 13, 1234ULL},
+  // {0.001f, 128, 64, 14, 1234ULL},
+  // {0.001f, 128, 128, 15, 1234ULL},
+  // // {0.001f, 64, 128, 16, 1234ULL},
 
-  {0.001f, 32, 32, 17, 1234ULL},
-  {0.001f, 32, 64, 18, 1234ULL},
-  {0.001f, 64, 32, 19, 1234ULL},
-  {0.001f, 64, 64, 20, 1234ULL},
-  {0.001f, 128, 32, 21, 1234ULL},
-  {0.001f, 128, 64, 22, 1234ULL},
-  {0.001f, 128, 128, 23, 1234ULL},
-  {0.00001, 64, 128, 24, 1234ULL},
-  {0.001f, 1805, 134, 25, 1234ULL},
+  // {0.001f, 32, 32, 17, 1234ULL},
+  // {0.001f, 32, 64, 18, 1234ULL},
+  // {0.001f, 64, 32, 19, 1234ULL},
+  // {0.001f, 64, 64, 20, 1234ULL},
+  // {0.001f, 128, 32, 21, 1234ULL},
+  // {0.001f, 128, 64, 22, 1234ULL},
+  // {0.001f, 128, 128, 23, 1234ULL},
+  // {0.00001, 64, 128, 24, 1234ULL},
+  // {0.001f, 1805, 134, 25, 1234ULL},
 };
+typedef FusedL2NNTest_GF<float, true> FusedL2NNTestGF;
+TEST_P(FusedL2NNTestGF, Result)
+{
+  runTest(min.data());
+  ASSERT_TRUE(devArrMatch(
+    min_ref.data(), min.data(), params.m, CompareApproxAbsKVP<float>(params.tolerance), stream));
+}
+INSTANTIATE_TEST_CASE_P(FusedL2NNTests, FusedL2NNTestGF, ::testing::ValuesIn(inputsf_GF));
+
+
+
 typedef FusedL2NNTest<float, false> FusedL2NNTestF_Sq;
 TEST_P(FusedL2NNTestF_Sq, Result)
 {

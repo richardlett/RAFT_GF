@@ -89,6 +89,11 @@ void connect_components_GF(
   red_op reduction_op,
   raft::distance::DistanceType metric = raft::distance::DistanceType::L2SqrtExpanded)
 {
+  if (n_cols2 % 16 != 0 || n_cols1 % 16 != 0) {
+    std::cerr << "nscols " <<  n_cols1 << " ncols2 " << n_cols2 << std::endl;
+  }
+  ASSERT(n_cols1 % 16 == 0, "ncols");
+  ASSERT(n_cols2 % 16 == 0, "ncols");
   detail::connect_components_GF(handle, out, X1, X2, orig_colors, n_rows, n_cols1, n_cols2, reduction_op, metric);
 }
 

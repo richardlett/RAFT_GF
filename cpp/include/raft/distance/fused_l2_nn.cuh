@@ -331,6 +331,29 @@ void fusedL2NNMinReduce(OutT* min,
     min, x, y, xn, yn, m, n, k, workspace, redOp, pairRedOp, sqrt, initOutBuffer, stream);
 }
 
+template <typename DataT, typename OutT, typename IdxT>
+void fusedL2NNMinReduce_GF(OutT* min,
+                        const DataT* x1,
+                        const DataT* y1,
+                        const DataT* x2,
+                        const DataT* y2,
+                        const DataT* xn,
+                        const DataT* yn,
+                        IdxT m,
+                        IdxT n,
+                        IdxT k1,IdxT k2,
+                        void* workspace,
+                        bool sqrt,
+                        bool initOutBuffer,
+                        cudaStream_t stream)
+{
+  MinAndDistanceReduceOp<IdxT, DataT> redOp;
+  KVPMinReduce<IdxT, DataT> pairRedOp;
+
+  fusedL2NN_GF<DataT, OutT, IdxT>(
+    min, x1, y1,x2,y2, xn, yn, m, n, k1,k2, workspace, redOp, pairRedOp, sqrt, initOutBuffer, stream);
+}
+
 }  // namespace distance
 }  // namespace raft
 

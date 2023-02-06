@@ -28,11 +28,27 @@ struct fusedl2nn_inputs {
   int64_t m, n, k;
 };  // struct fusedl2nn_inputs
 
+struct fusedl2nn_inputs_GF {
+  int64_t m, n, k1, k2;
+};  // struct fusedl2nn_inputs
+
+
 inline auto operator<<(std::ostream& os, const fusedl2nn_inputs& p) -> std::ostream&
 {
   os << p.m << "#" << p.n << "#" << p.k;
   return os;
 }
+
+
+inline auto operator<<(std::ostream& os, const fusedl2nn_inputs_GF& p) -> std::ostream&
+{
+  os << p.m << "#" << p.n << "#" << p.k1 << "#" << p.k2;
+  return os;
+}
+
+
+
+
 
 template <typename DataT, typename IdxT, typename OutT>
 struct fusedl2nn : public fixture {
@@ -69,6 +85,8 @@ struct fusedl2nn : public fixture {
                           stream);
     handle.sync_stream(stream);
   }
+
+
 
   void allocate_temp_buffers(const ::benchmark::State& state) override
   {
@@ -138,16 +156,151 @@ std::vector<fusedl2nn_inputs> getFusedL2NNInputs()
   return inputs;
 }
 
+
+template <typename DataT, typename IdxT, typename OutT>
+struct fusedl2nn_GF : public fixture {
+  fusedl2nn_GF(const fusedl2nn_inputs_GF& p) : params(p) {}
+
+  void allocate_data(const ::benchmark::State& state) override
+  {
+    x1      = raft::make_device_matrix<DataT, IdxT>(handle, params.m, params.k1);
+    y1      = raft::make_device_matrix<DataT, IdxT>(handle, params.n, params.k1);
+    x2      = raft::make_device_matrix<DataT, IdxT>(handle, params.m, params.k2);
+    y2      = raft::make_device_matrix<DataT, IdxT>(handle, params.n, params.k2);
+    x_norm = raft::make_device_vector<DataT, IdxT>(handle, params.m);
+    y_norm = raft::make_device_vector<DataT, IdxT>(handle, params.n);
+    out    = raft::make_device_vector<OutT, IdxT>(handle, params.m);
+
+    raft::random::RngState rng{1234};
+    raft::random::uniform(
+      handle, rng, x1.data_handle(), params.m * params.k1, (DataT)-1.0, (DataT)1.0);
+    raft::random::uniform(
+      handle, rng, x2.data_handle(), params.m * params.k2, (DataT)-1.0, (DataT)1.0);
+    raft::random::uniform(
+      handle, rng, y1.data_handle(), params.n * params.k1, (DataT)-1.0, (DataT)1.0);
+    raft::random::uniform(
+      handle, rng, y2.data_handle(), params.n * params.k2, (DataT)-1.0, (DataT)1.0);
+    // Pre-compute norms
+    // raft::linalg::rowNorm(x_norm.data_handle(),
+    //                       x.data_handle(),
+    //                       params.k,
+    //                       params.m,
+    //                       raft::linalg::L2Norm,
+    //                       true,
+    //                       stream);
+    // raft::linalg::rowNorm(y_norm.data_handle(),
+    //                       y.data_handle(),
+    //                       params.k,
+    //                       params.n,
+    //                       raft::linalg::L2Norm,
+    //                       true,
+    //                       stream);
+    handle.sync_stream(stream);
+  }
+
+
+
+  void allocate_temp_buffers(const ::benchmark::State& state) override
+  {
+    workspace = raft::make_device_vector<char, IdxT>(handle, params.m * sizeof(IdxT));
+  }
+
+  void run_benchmark(::benchmark::State& state) override
+  {
+    std::ostringstream label_stream;
+    label_stream << params;
+    state.SetLabel(label_stream.str());
+
+    loop_on_state(state, [this]() {
+      raft::distance::fusedL2NNMinReduce_GF<DataT, OutT, IdxT>(out.data_handle(),
+                                                            x1.data_handle(),
+                                                            y1.data_handle(),
+                                                            x2.data_handle(),
+                                                            y2.data_handle(),
+                                                            x_norm.data_handle(),
+                                                            y_norm.data_handle(),
+                                                            static_cast<IdxT>(params.m),
+                                                            static_cast<IdxT>(params.n),
+                                                            static_cast<IdxT>(params.k1),
+                                                            static_cast<IdxT>(params.k2),
+                                                            (void*)workspace.data_handle(),
+                                                            false,
+                                                            true,
+                                                            stream);
+       cudaDeviceSynchronize();
+
+    });
+
+    int64_t num_flops = 2 * params.m * params.n * (params.k1 + params.k2 + 1);
+
+    int64_t read_elts  = params.n * (params.k1 + params.k2 ) + params.m * (params.k1 + params.k2);
+    int64_t write_elts = params.m;
+
+    state.counters["FLOP/s"] = benchmark::Counter(
+      num_flops, benchmark::Counter::kIsIterationInvariantRate, benchmark::Counter::OneK::kIs1000);
+
+    state.counters["BW Wr"] = benchmark::Counter(write_elts * sizeof(OutT),
+                                                 benchmark::Counter::kIsIterationInvariantRate,
+                                                 benchmark::Counter::OneK::kIs1000);
+    state.counters["BW Rd"] = benchmark::Counter(read_elts * sizeof(DataT),
+                                                 benchmark::Counter::kIsIterationInvariantRate,
+                                                 benchmark::Counter::OneK::kIs1000);
+  }
+
+ private:
+  fusedl2nn_inputs_GF params;
+  raft::device_matrix<DataT, IdxT> x1, x2, y1, y2;
+  raft::device_vector<DataT, IdxT> x_norm, y_norm;
+  raft::device_vector<OutT, IdxT> out;
+  raft::device_vector<char, IdxT> workspace;
+};  // struct fusedl2nn
+
+template <typename IdxT>
+std::vector<fusedl2nn_inputs_GF> getFusedL2NNInputs_GF()
+{
+  std::vector<fusedl2nn_inputs_GF> inputs;
+  std::vector<int64_t> m_list = {100000, 200000};
+  //if constexpr (sizeof(IdxT) == 8) { m_list.push_back(10000000); }
+  std::vector<int64_t> n_list = {100000, 200000};
+  std::vector<int64_t> k1_list = {128, 256,512};
+  std::vector<int64_t> k2_list = {160, 320, 1600,3200};
+
+  for (auto m : m_list) {
+    for (auto n : n_list) {
+      for (auto k1 : k1_list) {
+        for (auto k2 : k2_list) {
+        inputs.push_back({m, n, k1,k2});
+        }
+      }
+    }
+  }
+  inputs.push_back({100000,100000,1024,1024});
+  return inputs;
+}
+
+
 #define FUSEDL2NN_BENCH(DataT, IdxT, OutT) \
   RAFT_BENCH_REGISTER((fusedl2nn<DataT, IdxT, RAFT_DEPAREN(OutT)>), "", getFusedL2NNInputs<IdxT>())
 
 FUSEDL2NN_BENCH(float, int, float);
-FUSEDL2NN_BENCH(double, int, double);
+// FUSEDL2NN_BENCH(double, int, double);
 FUSEDL2NN_BENCH(float, int, (raft::KeyValuePair<int, float>));
-FUSEDL2NN_BENCH(double, int, (raft::KeyValuePair<int, double>));
-FUSEDL2NN_BENCH(float, int64_t, float);
-FUSEDL2NN_BENCH(double, int64_t, double);
-FUSEDL2NN_BENCH(float, int64_t, (raft::KeyValuePair<int64_t, float>));
-FUSEDL2NN_BENCH(double, int64_t, (raft::KeyValuePair<int64_t, double>));
+// FUSEDL2NN_BENCH(double, int, (raft::KeyValuePair<int, double>));
+// FUSEDL2NN_BENCH(float, int64_t, float);
+// FUSEDL2NN_BENCH(double, int64_t, double);
+// FUSEDL2NN_BENCH(float, int64_t, (raft::KeyValuePair<int64_t, float>));
+// FUSEDL2NN_BENCH(double, int64_t, (raft::KeyValuePair<int64_t, double>));
+
+
+
+
+#define FUSEDL2NN_BENCH_GF(DataT, IdxT, OutT) \
+  RAFT_BENCH_REGISTER((fusedl2nn_GF<DataT, IdxT, RAFT_DEPAREN(OutT)>), "", getFusedL2NNInputs_GF<IdxT>())
+
+FUSEDL2NN_BENCH_GF(float, int, float);
+
+FUSEDL2NN_BENCH_GF(float, int, (raft::KeyValuePair<int, float>));
+
+
 
 }  // namespace raft::bench::distance

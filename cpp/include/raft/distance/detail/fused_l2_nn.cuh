@@ -317,7 +317,7 @@ __global__ __launch_bounds__(P::Nthreads, 2) void fusedL2NNkernel_GF(OutT* min,
 #pragma unroll
         for (int j = 0; j < P::AccColsPerTh; ++j) {
           auto acc_ij = acc[i][j];
-          acc[i][j]   = acc_ij; // > DataT{0} ? raft::mySqrt(acc_ij) : DataT{0};
+          acc[i][j]   = acc_ij > DataT{0} ? raft::mySqrt(acc_ij) : DataT{0};
         }
       }
     }
@@ -456,7 +456,7 @@ void fusedL2NNImpl_GF(OutT* min,
 
   auto fin_op = [] __device__(DataT d_val, int g_d_idx) { return d_val; };
 
-  constexpr size_t shmemSize = P::SmemSize + ((P::Mblk + P::Nblk) * sizeof(DataT));
+  constexpr size_t shmemSize = P::SmemSize ;
   if (sqrt) {
     auto fusedL2NNSqrt = fusedL2NNkernel_GF<DataT,
                                          OutT,

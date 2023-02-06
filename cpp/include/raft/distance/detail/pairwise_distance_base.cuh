@@ -318,6 +318,7 @@ struct PairwiseDistances_GF : public BaseClass {
   EpilogueLambda epilog_op;
   FinalLambda fin_op;
   rowEpilogueLambda rowEpilog_op;
+  
 
   AccT acc[P::AccRowsPerTh][P::AccColsPerTh];
   AccT acc2[P::AccRowsPerTh][P::AccColsPerTh];
@@ -410,7 +411,6 @@ struct PairwiseDistances_GF : public BaseClass {
         // do last accumulate for X1,Y1,
         accumulate1();  // last iteration
 
-
         #pragma unroll
         for (int i = 0; i < P::AccRowsPerTh; ++i) {
           #pragma unroll
@@ -441,16 +441,11 @@ struct PairwiseDistances_GF : public BaseClass {
         // it doesn't make shmem dirty until previous iteration
         // is complete.
         this->pageRd ^= 1;
-        __threadfence();
 
-        __syncthreads();
         epilog(gridStrideX, gridStrideY);
-        __syncthreads();
-        __threadfence();
 
       }
       rowEpilog_op(gridStrideY);
-      __threadfence();
       
     }
   }
@@ -528,7 +523,7 @@ struct PairwiseDistances_GF : public BaseClass {
     for (int i = 0; i < P::AccRowsPerTh; ++i) {
 #pragma unroll
       for (int j = 0; j < P::AccColsPerTh; ++j) {
-        acc2[i][j] = BaseClass::Zero;
+        acc[i][j] = BaseClass::Zero;
       }
     }
 
@@ -615,38 +610,6 @@ struct PairwiseDistances_GF : public BaseClass {
 
   DI void epilog(IdxT gridStrideX, IdxT gridStrideY)
   {
-   
-    // Overlap ldg with epilog computation
-
-     DataT* sxNorm = (DataT*)(&smem[P::SmemSize]);
-      DataT* syNorm = (&sxNorm[P::Mblk]);
-
-      // Load x & y norms required by this threadblock in shmem buffer
-      if (gridStrideX == blockIdx.x * P::Nblk) {
-        for (int i = threadIdx.x; i < P::Mblk; i += P::Nthreads) {
-          auto idx  = gridStrideY + i;
-          sxNorm[i] = idx < this->m ? xn[idx] : 0;
-        }
-      }
-
-      for (int i = threadIdx.x; i < P::Nblk; i += P::Nthreads) {
-        auto idx  = gridStrideX + i;
-        syNorm[i] = idx < this->n ? yn[idx] : 0;
-      }
-
-      __syncthreads();
-
-      DataT regxn[P::AccRowsPerTh], regyn[P::AccColsPerTh];
-#pragma unroll
-      for (int i = 0; i < P::AccRowsPerTh; ++i) {
-        regxn[i] = sxNorm[i * P::AccThRows + (threadIdx.x / P::AccThCols)];
-      }
-#pragma unroll
-      for (int i = 0; i < P::AccColsPerTh; ++i) {
-        regyn[i] = syNorm[i * P::AccThCols + (threadIdx.x % P::AccThCols)];
-      }
-
-    
     ldgNextGridStride(gridStrideX, gridStrideY);
     #pragma unroll
     for (int i = 0; i < P::AccRowsPerTh; ++i) {
@@ -655,12 +618,7 @@ struct PairwiseDistances_GF : public BaseClass {
         acc2[i][j] *= acc[i][j];
       }
     }
-    __syncthreads();
-    __threadfence();
-
-
-
-    epilog_op(acc2, regxn, regyn, gridStrideX, gridStrideY);
+    epilog_op(acc2, nullptr, nullptr, gridStrideX, gridStrideY);
   
   }
 };  // struct PairwiseDistances
